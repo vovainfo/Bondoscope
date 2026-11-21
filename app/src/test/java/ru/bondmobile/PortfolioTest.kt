@@ -240,6 +240,89 @@ class PortfolioTest {
         assertEquals(DEFAULT_PORTFOLIO_ID, restored.trades.single().portfolioId)
     }
 
+    @Test
+    fun explainsMissingValuationsWithoutChangingThePartialTotal() {
+        val other = bond.copy(isin = "RU000A10GDW3", secid = "RU000A10GDW3", name = "Другая облигация")
+        val buy = Trade("buy", isin, TradeSide.BUY, 2, "2026-11-02", null, PriceUnit.RUB_WITH_ACCRUED,
+            "1000", null, null, "0")
+        val quotes = listOf(Quote(isin, "2026-11-20", "100", "1000", "0"),
+            Quote(other.isin, "2026-11-20", "100", "1000", "0"))
+        val coupon = Payment("coupon", other.isin, PaymentKind.COUPON, "2026-11-21", null, "10")
+        val data = Portfolio(listOf(bond, other), listOf(buy, buy.copy(id = "other-buy", isin = other.isin)),
+            listOf(coupon), quotes)
+        val today = day("2026-11-21")
+        val overview = PortfolioMath(data).overview(today)
+        assertTrue(overview.valueIsPartial)
+        assertMoney("2000", overview.partialValue)
+        assertNull(overview.points.last().value)
+        assertMoney("4000", overview.points[overview.points.lastIndex - 1].value)
+        val issue = overview.holdings.single { it.bond.isin == other.isin }.issue
+        assertEquals(ValuationIssue.CouponAccrualUnknown("2026-11-21"), issue)
+
+        val single = data.copy(bonds = listOf(bond), trades = listOf(buy), payments = emptyList())
+        fun issueFor(vararg values: Quote, date: LocalDate = today, instrument: Bond = bond) =
+            PortfolioMath(single.copy(bonds = listOf(instrument), quotes = values.toList())).overview(date).holdings.single().issue
+        val saved = quotes.first()
+        assertNull(issueFor(saved))
+        assertEquals(ValuationIssue.NoQuote, issueFor())
+        assertEquals(ValuationIssue.OldQuote, issueFor(saved, date = day("2026-11-28")))
+        assertEquals(ValuationIssue.MissingFields(listOf(QuoteField.NOMINAL, QuoteField.ACCRUED)),
+            issueFor(saved.copy(nominal = null, accrued = null)))
+        assertEquals(ValuationIssue.NominalChanged,
+            issueFor(saved, instrument = bond.copy(nominal = "900", nominalDate = "2026-11-21")))
+        assertEquals(ValuationIssue.Maturity, issueFor(saved, instrument = bond.copy(maturity = "2026-11-21")))
+        assertEquals(ValuationIssue.UnsupportedCurrency, issueFor(saved, instrument = bond.copy(currency = "USD")))
+    }
+
+    @Test
+    fun keepsPoliplastValuedAfterTheCouponAndUsesTheNextExchangeQuote() {
+        val poliplastIsin = "RU000A10DZK8"
+        val poliplast = Bond(poliplastIsin, poliplastIsin, "ПолипП2Б13", "TQCB", currency = "RUB")
+        val buy = Trade("buy", poliplastIsin, TradeSide.BUY, 200, "2026-11-20", null, PriceUnit.RUB_WITH_ACCRUED,
+            "700", null, null, "0")
+        val oldQuote = Quote(poliplastIsin, "2026-11-20", "69.31", "1000", "15.45")
+        val paid = Payment("paid", poliplastIsin, PaymentKind.COUPON, "2026-11-21", "2026-11-20", "15.99",
+            periodStart = "2026-10-22", nominalBefore = "1000")
+        val next = paid.copy(id = "next", date = "2026-12-21", recordDate = "2026-12-18", periodStart = paid.date)
+        val data = Portfolio(listOf(poliplast), listOf(buy), listOf(paid, next), listOf(oldQuote))
+        val math = PortfolioMath(data)
+        val onCoupon = math.overview(day(paid.date))
+        assertFalse(onCoupon.valueIsPartial)
+        assertMoney("138620", onCoupon.holdings.single().value)
+        assertMoney("0", onCoupon.holdings.single().estimatedAccrued)
+        assertEquals(oldQuote.date, onCoupon.holdings.single().quoteDate)
+        assertMoney("3198", onCoupon.receivedCoupons)
+        assertMoney("141710", onCoupon.points.first().value)
+        assertFalse(onCoupon.points.first().usesEstimatedValuation)
+        assertMoney("138620", onCoupon.points.last().value)
+        assertMoney("1818", onCoupon.points.last().result)
+        assertTrue(onCoupon.points.last().usesEstimatedValuation)
+
+        val later = math.overview(day("2026-11-22"))
+        assertMoney("0.53", later.holdings.single().estimatedAccrued)
+        assertMoney("138726", later.points.last().value)
+        assertMoney("139260", math.overview(day("2026-11-27")).points.last().value)
+        assertEquals(ValuationIssue.OldQuote, math.overview(day("2026-11-28")).holdings.single().issue)
+
+        val fresh = Quote(poliplastIsin, "2026-11-23", "70", "1000", "1.60")
+        val refreshed = PortfolioMath(data.copy(quotes = data.quotes + fresh)).overview(day(fresh.date))
+        assertMoney("140320", refreshed.holdings.single().value)
+        assertNull(refreshed.holdings.single().estimatedAccrued)
+        assertFalse(refreshed.points.last().usesEstimatedValuation)
+        assertTrue(refreshed.points[1].usesEstimatedValuation)
+
+        val amortization = paid.copy(id = "amortization", kind = PaymentKind.AMORTIZATION, amountPerBond = "100")
+        val acrossAmortization = PortfolioMath(data.copy(payments = data.payments + amortization)).overview(day(paid.date))
+        assertEquals(ValuationIssue.AfterPayment(paid.date, PaymentKind.AMORTIZATION), acrossAmortization.holdings.single().issue)
+        assertNull(acrossAmortization.points.last().value)
+
+        val changed = data.copy(payments = listOf(paid, next.copy(nominalBefore = "900")))
+        assertNull(PortfolioMath(changed).overview(day(paid.date)).holdings.single().value)
+        val unknownCoupon = data.copy(payments = listOf(paid, next.copy(amountPerBond = null)))
+        assertEquals(ValuationIssue.CouponAccrualUnknown(paid.date),
+            PortfolioMath(unknownCoupon).overview(day("2026-11-22")).holdings.single().issue)
+    }
+
     private fun assertMoney(expected: String, actual: BigDecimal?) {
         assertEquals(0, BigDecimal(expected).compareTo(requireNotNull(actual)))
     }

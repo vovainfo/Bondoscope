@@ -1,22 +1,40 @@
 package ru.bondmobile
 
 import java.math.BigDecimal
+import java.math.RoundingMode
 import java.time.LocalDate
 import java.time.YearMonth
 import java.time.temporal.ChronoUnit
+
+const val MAX_QUOTE_AGE_DAYS = 7L
 
 data class Holding(
     val bond: Bond,
     val quantity: Long,
     val value: BigDecimal?,
     val quoteDate: String?,
-    val stale: Boolean
+    val issue: ValuationIssue?,
+    val estimatedAccrued: BigDecimal? = null
 )
+
+enum class QuoteField { PRICE, NOMINAL, ACCRUED }
+
+sealed interface ValuationIssue {
+    data object NoQuote : ValuationIssue
+    data object OldQuote : ValuationIssue
+    data object UnsupportedCurrency : ValuationIssue
+    data object Maturity : ValuationIssue
+    data object NominalChanged : ValuationIssue
+    data class AfterPayment(val date: String, val kind: PaymentKind) : ValuationIssue
+    data class CouponAccrualUnknown(val date: String) : ValuationIssue
+    data class MissingFields(val fields: List<QuoteField>) : ValuationIssue
+}
 
 data class PortfolioPoint(
     val date: LocalDate,
     val value: BigDecimal?,
-    val result: BigDecimal?
+    val result: BigDecimal?,
+    val usesEstimatedValuation: Boolean
 )
 
 data class Overview(
@@ -118,7 +136,8 @@ class PortfolioMath(private val portfolio: Portfolio) {
             val completeValue = active.takeIf { items -> items.all { it.value != null } }
                 ?.fold(BigDecimal.ZERO) { sum, item -> sum + item.value!! }
             if (portfolio.trades.isNotEmpty()) {
-                series += PortfolioPoint(day, completeValue, completeValue?.takeIf { flowsKnown }?.plus(totalFlow))
+                series += PortfolioPoint(day, completeValue, completeValue?.takeIf { flowsKnown }?.plus(totalFlow),
+                    completeValue != null && active.any { it.estimatedAccrued != null })
             }
             if (day == today) holdings = active.sortedBy { it.bond.name }
             day = day.plusDays(1)
@@ -165,24 +184,61 @@ class PortfolioMath(private val portfolio: Portfolio) {
 
     private fun holding(isin: String, count: Long, day: LocalDate): Holding {
         val bond = bonds[isin] ?: Bond(isin, isin, isin)
-        if (bond.currency != null && !bond.currency.isRubles()) return Holding(bond, count, null, null, false)
+        if (bond.currency != null && !bond.currency.isRubles()) {
+            return Holding(bond, count, null, null, ValuationIssue.UnsupportedCurrency)
+        }
         val date = day.toString()
         val quote = quoteAt(isin, date)
-        val age = quote?.let { ChronoUnit.DAYS.between(LocalDate.parse(it.date), day) }
-        val crossedPayment = quote != null && (payments[isin].orEmpty().any { it.date > quote.date && it.date <= date } ||
-            (bond.maturity != null && bond.maturity > quote.date && bond.maturity <= date))
-        val matured = bond.maturity?.let { it <= date } == true || payments[isin].orEmpty().any {
+        fun unavailable(issue: ValuationIssue) = Holding(bond, count, null, quote?.date, issue)
+        val schedule = payments[isin].orEmpty()
+        val matured = bond.maturity?.let { it <= date } == true || schedule.any {
             it.kind == PaymentKind.REDEMPTION && it.date <= date
         }
-        val nominal = quote?.let { nominalAt(isin, it.date, it) }
-        val currentNominal = if (quote?.date == date) nominal else nominalAt(isin, date, null)
-        val changedNominal = nominal != null && currentNominal != null && nominal.compareTo(currentNominal) != 0
-        val accrued = quote?.accrued?.toBigDecimal()
-        val clean = quote?.cleanPercent?.toBigDecimal()
-        val value = if (age != null && age <= 7 && !crossedPayment && !matured && !changedNominal &&
-            nominal != null && accrued != null && clean != null) {
-            (clean.multiply(nominal).movePointLeft(2) + accrued) * count.toBigDecimal()
-        } else null
-        return Holding(bond, count, value, quote?.date, age != null && age > 0)
+        if (matured) return unavailable(ValuationIssue.Maturity)
+        if (quote == null) return unavailable(ValuationIssue.NoQuote)
+        if (ChronoUnit.DAYS.between(LocalDate.parse(quote.date), day) > MAX_QUOTE_AGE_DAYS) {
+            return unavailable(ValuationIssue.OldQuote)
+        }
+
+        val crossedPayments = schedule.filter { it.date > quote.date && it.date <= date }
+        val principal = crossedPayments.filter { it.kind != PaymentKind.COUPON }.maxByOrNull { it.date }
+        if (principal != null) return unavailable(ValuationIssue.AfterPayment(principal.date, principal.kind))
+
+        val nominal = nominalAt(isin, quote.date, quote)
+        val currentNominal = if (quote.date == date) nominal else nominalAt(isin, date, null)
+        if (nominal != null && currentNominal != null && nominal.compareTo(currentNominal) != 0) {
+            return unavailable(ValuationIssue.NominalChanged)
+        }
+
+        val lastCoupon = crossedPayments.maxByOrNull { it.date }
+        val quotedAccrued = quote.accrued?.toBigDecimal()
+        val clean = quote.cleanPercent?.toBigDecimal()
+        if (nominal == null || clean == null || (lastCoupon == null && quotedAccrued == null)) {
+            return unavailable(ValuationIssue.MissingFields(buildList {
+                if (clean == null) add(QuoteField.PRICE)
+                if (nominal == null) add(QuoteField.NOMINAL)
+                if (lastCoupon == null && quotedAccrued == null) add(QuoteField.ACCRUED)
+            }))
+        }
+        val estimatedAccrued = lastCoupon?.let { couponAccruedAt(schedule, day, it.date, nominal) }
+        if (lastCoupon != null && estimatedAccrued == null) {
+            return unavailable(ValuationIssue.CouponAccrualUnknown(lastCoupon.date))
+        }
+        val accrued = estimatedAccrued ?: requireNotNull(quotedAccrued)
+        val value = (clean.multiply(nominal).movePointLeft(2) + accrued) * count.toBigDecimal()
+        return Holding(bond, count, value, quote.date, null, estimatedAccrued)
+    }
+
+    private fun couponAccruedAt(schedule: List<Payment>, day: LocalDate, start: String, nominal: BigDecimal): BigDecimal? {
+        val date = day.toString()
+        val next = schedule.singleOrNull { it.kind == PaymentKind.COUPON && it.periodStart == start && it.date > date }
+            ?: return null
+        val periodNominal = next.nominalBefore?.toBigDecimal() ?: return null
+        if (nominal.compareTo(periodNominal) != 0) return null
+        val coupon = next.amountPerBond?.toBigDecimal() ?: return null
+        val startDate = LocalDate.parse(start)
+        val daysElapsed = ChronoUnit.DAYS.between(startDate, day).toBigDecimal()
+        val periodDays = ChronoUnit.DAYS.between(startDate, LocalDate.parse(next.date)).toBigDecimal()
+        return coupon.multiply(daysElapsed).divide(periodDays, 2, RoundingMode.HALF_UP)
     }
 }
