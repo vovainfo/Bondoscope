@@ -1,0 +1,9 @@
+.gradle/
+.gradle-user/
+.kotlin/
+.tooling/
+.gradle-*-bin.zip
+**/build/
+local.properties
+.idea/
+*.iml
