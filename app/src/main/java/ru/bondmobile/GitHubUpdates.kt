@@ -13,6 +13,7 @@ import java.security.MessageDigest
 import javax.net.ssl.HttpsURLConnection
 
 private const val REPOSITORY = "vovainfo/Bondoscope"
+private const val RELEASE_MANIFEST = "bondoscope-update.json"
 private const val MAX_APK_BYTES = 100L * 1024 * 1024
 private val VERSION = Regex("""(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)""")
 private val SHA256 = Regex("[a-f0-9]{64}")
@@ -62,22 +63,32 @@ internal class GitHubUpdates(private val context: Context) {
     private val installed = packageManager.getPackageInfo(context.packageName, 0)
     val installedVersion = installed.versionName.orEmpty()
 
-    fun latest(): UpdateRelease? {
+    suspend fun latest(): UpdateRelease? {
         val url = URI("https://api.github.com/repos/$REPOSITORY/releases/latest").toURL()
         val connection = connect(url)
         try {
             connection.setRequestProperty("Accept", "application/vnd.github+json")
             when (val status = connection.responseCode) {
-                200 -> {
-                    val json = connection.inputStream.bufferedReader(Charsets.UTF_8).use { JSONObject(it.readText()) }
-                    return parseLatestRelease(json, installedVersion)
-                }
-                403, 429 -> throw UpdateException("GitHub ограничил число запросов. Повторите проверку позже.")
+                200 -> return readRelease(connection)
+                403, 429 -> Unit
                 else -> throw UpdateException("Не удалось проверить релиз GitHub (HTTP $status)")
             }
         } finally {
             connection.disconnect()
         }
+
+        val manifest = URI("https://github.com/$REPOSITORY/releases/latest/download/$RELEASE_MANIFEST").toURL()
+        val fallback = openDownload(manifest, "получить сведения о релизе")
+        try {
+            return readRelease(fallback)
+        } finally {
+            fallback.disconnect()
+        }
+    }
+
+    private fun readRelease(connection: HttpsURLConnection): UpdateRelease? {
+        val json = connection.inputStream.bufferedReader(Charsets.UTF_8).use { JSONObject(it.readText()) }
+        return parseLatestRelease(json, installedVersion)
     }
 
     suspend fun download(release: UpdateRelease, onProgress: (Int) -> Unit): File {
@@ -85,7 +96,7 @@ internal class GitHubUpdates(private val context: Context) {
         if (!folder.mkdirs() && !folder.isDirectory) throw IOException("Update cache is unavailable")
         val temporary = File.createTempFile("download-", ".apk", folder)
         try {
-            val connection = openApk(URI(release.url).toURL())
+            val connection = openDownload(URI(release.url).toURL(), "скачать APK")
             try {
                 saveVerifiedApk(connection, release, temporary, onProgress)
             } finally {
@@ -134,12 +145,12 @@ internal class GitHubUpdates(private val context: Context) {
         }
     }
 
-    private suspend fun openApk(initialUrl: URL): HttpsURLConnection {
+    private suspend fun openDownload(initialUrl: URL, action: String): HttpsURLConnection {
         var url = initialUrl
         repeat(5) {
             currentCoroutineContext().ensureActive()
             if (url.protocol != "https" || url.host !in DOWNLOAD_HOSTS || url.userInfo != null || url.port !in setOf(-1, 443)) {
-                throw UpdateException("GitHub вернул неподдерживаемый адрес скачивания APK")
+                throw UpdateException("GitHub вернул неподдерживаемый адрес скачивания")
             }
             val connection = connect(url)
             var downloadOpen = false
@@ -151,14 +162,14 @@ internal class GitHubUpdates(private val context: Context) {
                 }
                 val location = connection.getHeaderField("Location")
                 if (status !in 300..399 || location.isNullOrBlank()) {
-                    throw UpdateException("Не удалось скачать APK с GitHub (HTTP $status)")
+                    throw UpdateException("Не удалось $action с GitHub (HTTP $status)")
                 }
                 url = url.toURI().resolve(location).toURL()
             } finally {
                 if (!downloadOpen) connection.disconnect()
             }
         }
-        throw UpdateException("Слишком много переадресаций при скачивании APK")
+        throw UpdateException("Слишком много переадресаций при скачивании с GitHub")
     }
 
     private fun connect(url: URL) = (url.openConnection() as HttpsURLConnection).apply {
