@@ -26,6 +26,7 @@ sealed interface ValuationIssue {
     data object Maturity : ValuationIssue
     data object NominalChanged : ValuationIssue
     data class AfterPayment(val date: String, val kind: PaymentKind) : ValuationIssue
+    data class CouponUnverified(val date: String) : ValuationIssue
     data class CouponAccrualUnknown(val date: String) : ValuationIssue
     data class MissingFields(val fields: List<QuoteField>) : ValuationIssue
 }
@@ -70,7 +71,9 @@ class PortfolioMath(private val portfolio: Portfolio) {
     private val payments = portfolio.payments.filter {
         it.isScheduled && bonds[it.isin]?.currency?.isRubles() != false
     }.groupBy { it.isin }
-    private val closures = payments.mapNotNull { (isin, schedule) -> schedule.redemptionDate()?.let { isin to it } }.toMap()
+    private val closures = payments.mapNotNull { (isin, schedule) ->
+        schedule.redemptionDate(bonds[isin])?.let { isin to it }
+    }.toMap()
     private val candidates by lazy {
         payments.values.flatten().filter { payment ->
             val cutoff = payment.recordDate ?: payment.date
@@ -101,6 +104,12 @@ class PortfolioMath(private val portfolio: Portfolio) {
     }
 
     fun paymentCandidates(): List<Payment> = candidates
+
+    fun paymentStatus(payment: Payment, today: String): PaymentStatus = when {
+        payment.date > today -> PaymentStatus.PLANNED
+        bonds[payment.isin]?.requiresPaymentVerification(payment.date) == true -> PaymentStatus.UNVERIFIED
+        else -> PaymentStatus.BY_CALENDAR
+    }
 
     fun monthlyReceipts(today: LocalDate = marketToday()): Map<YearMonth, MonthlyReceipt> =
         receivedBy(today).groupBy { YearMonth.from(LocalDate.parse(it.first.date)) }.mapValues { (_, rows) ->
@@ -181,7 +190,10 @@ class PortfolioMath(private val portfolio: Portfolio) {
 
     private fun receivedBy(today: LocalDate): List<Pair<Payment, BigDecimal?>> {
         val date = today.toString()
-        return candidates.filter { it.date <= date }.map { it to estimate(it).amount }
+        return candidates.filter { it.date <= date }.map { payment ->
+            val amount = if (paymentStatus(payment, date) == PaymentStatus.BY_CALENDAR) estimate(payment).amount else null
+            payment to amount
+        }
     }
 
     private fun summarizeReceipts(rows: List<Pair<Payment, BigDecimal?>>): MonthlyReceipt {
@@ -237,6 +249,9 @@ class PortfolioMath(private val portfolio: Portfolio) {
         }
 
         val lastCoupon = crossedPayments.maxByOrNull { it.date }
+        if (lastCoupon != null && bond.requiresPaymentVerification(lastCoupon.date)) {
+            return unavailable(ValuationIssue.CouponUnverified(lastCoupon.date))
+        }
         val quotedAccrued = quote.accrued?.toBigDecimal()
         val clean = quote.cleanPercent?.toBigDecimal()
         if (nominal == null || clean == null || (lastCoupon == null && quotedAccrued == null)) {

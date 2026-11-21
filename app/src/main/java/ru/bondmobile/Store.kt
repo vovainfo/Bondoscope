@@ -51,7 +51,7 @@ interface PortfolioDao {
     @Query("DELETE FROM payments WHERE id = :id") suspend fun deletePayment(id: String)
 }
 
-@Database(entities = [Bond::class, Trade::class, Payment::class, Quote::class, NamedPortfolio::class], version = 2)
+@Database(entities = [Bond::class, Trade::class, Payment::class, Quote::class, NamedPortfolio::class], version = 3)
 abstract class BondDatabase : RoomDatabase() {
     abstract fun portfolio(): PortfolioDao
 }
@@ -83,10 +83,17 @@ internal val migratePortfolios = object : Migration(1, 2) {
     }
 }
 
+internal val migrateDefaultStatus = object : Migration(2, 3) {
+    override fun migrate(db: SupportSQLiteDatabase) {
+        db.execSQL("ALTER TABLE bonds ADD COLUMN defaultStatus TEXT")
+        db.execSQL("ALTER TABLE bonds ADD COLUMN paymentsUnverifiedThrough TEXT")
+    }
+}
+
 class BondApplication : Application() {
     val repository by lazy {
         PortfolioRepository(Room.databaseBuilder(this, BondDatabase::class.java, "portfolio.db")
-            .addMigrations(migratePortfolios)
+            .addMigrations(migratePortfolios, migrateDefaultStatus)
             .addCallback(object : RoomDatabase.Callback() {
                 override fun onCreate(db: SupportSQLiteDatabase) = seedDefaultPortfolio(db)
             }).build())
@@ -146,8 +153,9 @@ class PortfolioRepository(private val database: BondDatabase, private val moex: 
     suspend fun saveTrade(bond: Bond, trade: Trade, moveIssue: Boolean = false) = database.withTransaction {
         require(bond.currency == null || bond.currency.isRubles()) { "Первая версия поддерживает рублёвые облигации" }
         require(dao.accounts().any { it.id == trade.portfolioId }) { "Выберите портфель" }
+        val storedBond = dao.bond(bond.isin)
         if (trade.side == TradeSide.SELL) {
-            require(dao.bond(bond.isin) != null) { "Сначала добавьте покупку этого выпуска" }
+            require(storedBond != null) { "Сначала добавьте покупку этого выпуска" }
         }
         val current = dao.trades()
         val original = current.find { it.id == trade.id }
@@ -157,9 +165,9 @@ class PortfolioRepository(private val database: BondDatabase, private val moex: 
         val changes = (related.map { it.copy(portfolioId = trade.portfolioId) } + trade).associateBy { it.id }
         val allTrades = current.filterNot { it.id in changes } + changes.values
         require(validQuantityHistory(allTrades)) { "Проверьте положительный остаток и даты операций в каждом портфеле" }
-        val redemption = dao.payments(bond.isin).redemptionDate()
+        val redemption = dao.payments(bond.isin).redemptionDate(storedBond ?: bond)
         require(redemption == null || trade.date <= redemption) { "Дата сделки позже погашения по календарю" }
-        if (dao.bond(bond.isin) == null) dao.writeBond(bond)
+        if (storedBond == null) dao.writeBond(bond)
         dao.writeTrades(changes.values.toList())
     }
 
@@ -214,12 +222,10 @@ class PortfolioRepository(private val database: BondDatabase, private val moex: 
         val today = marketToday()
         val asOf = System.currentTimeMillis()
         val errors = mutableListOf<String>()
-        val described = if (original.board == null || asOf - original.updatedAt >= TimeUnit.DAYS.toMillis(7)) {
-            attempt { moex.describe(original) }.getOrElse {
-                errors += "${original.secid} · карточка выпуска"
-                original
-            }
-        } else original
+        val described = attempt { moex.describe(original) }.getOrElse {
+            errors += "${original.secid} · карточка и статус выпуска"
+            original
+        }
         if (described.currency != null && !described.currency.isRubles()) {
             dao.writeBond(described)
             return@supervisorScope listOf("${original.secid} · выпуск в иностранной валюте")

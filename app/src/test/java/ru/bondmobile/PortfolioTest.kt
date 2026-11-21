@@ -83,6 +83,59 @@ class PortfolioTest {
     }
 
     @Test
+    fun keepsUnverifiedCouponAndRedemptionOutOfReceiptsAndLeavesTheHoldingOpen() {
+        val defaulted = bond.copy(defaultStatus = BondDefaultStatus.DEFAULT, maturity = "2026-11-21")
+        val regular = bond.copy(isin = "RU000A10DZK8")
+        val buy = Trade("buy", isin, TradeSide.BUY, 64, "2025-07-24", null, PriceUnit.RUB_WITH_ACCRUED,
+            "1000", null, null, "0")
+        val coupon = Payment("coupon", isin, PaymentKind.COUPON, "2026-11-16", "2026-11-13", "20.34")
+        val redemption = Payment("redemption", isin, PaymentKind.REDEMPTION, "2026-11-21", null, "1000")
+        val ordinaryCoupon = Payment("other", regular.isin, PaymentKind.COUPON, "2026-11-21", null, "10")
+        val data = Portfolio(listOf(defaulted, regular),
+            listOf(buy, buy.copy(id = "other", isin = regular.isin, quantity = 1)),
+            listOf(coupon, redemption, ordinaryCoupon),
+            listOf(Quote(regular.isin, "2026-11-21", "100", "1000", "0")))
+        val math = PortfolioMath(data)
+        val today = day("2026-11-21")
+        val overview = math.overview(today)
+        assertEquals(PaymentStatus.PLANNED, math.paymentStatus(redemption, "2026-11-20"))
+        assertEquals(PaymentStatus.UNVERIFIED, math.paymentStatus(redemption, "2026-11-21"))
+        assertEquals(PaymentStatus.UNVERIFIED, math.paymentStatus(coupon, "2026-11-21"))
+        assertEquals(PaymentStatus.BY_CALENDAR, math.paymentStatus(ordinaryCoupon, "2026-11-21"))
+        assertMoney("1301.76", math.estimate(coupon).amount)
+        assertMoney("64000", math.estimate(redemption).amount)
+        assertEquals(64L, overview.holdings.single { it.bond.isin == isin }.quantity)
+        assertMoney("10", overview.receivedCoupons)
+        assertMoney("0", overview.receivedPrincipal)
+        assertTrue(overview.payoutsIncomplete)
+        assertMoney("10", overview.points.last().result)
+        assertTrue(overview.points.last().resultIsPartial)
+        val month = math.monthlyReceipts(today).getValue(YearMonth.of(2026, 11))
+        assertMoney("10", month.total)
+        assertTrue(month.incomplete)
+    }
+
+    @Test
+    fun preservesMoexDefaultStatusUntilExplicitlyClearedAndKeepsEarlierPaymentsUnverified() {
+        val moex = Moex()
+        val today = day("2026-11-21")
+        val technical = moex.readDefaultStatus(bond, "0", "1", today)
+        assertEquals(BondDefaultStatus.TECHNICAL_DEFAULT, technical.defaultStatus)
+        val flagged = moex.readDefaultStatus(technical, "1", "1", today)
+        assertEquals(BondDefaultStatus.DEFAULT, flagged.defaultStatus)
+        assertEquals(flagged, moex.readDefaultStatus(flagged, null, "1", today))
+        assertEquals(flagged, moex.readDefaultStatus(flagged, "0", null, today))
+        val cleared = moex.readDefaultStatus(flagged, "0", "0", today)
+        assertNull(cleared.defaultStatus)
+        assertTrue(cleared.requiresPaymentVerification("2026-11-21"))
+        assertFalse(cleared.requiresPaymentVerification("2026-11-22"))
+
+        val portfolio = Portfolio(listOf(flagged))
+        val bytes = ByteArrayOutputStream().apply { Backup.write(portfolio, this) }.toByteArray()
+        assertEquals(portfolio, Backup.read(ByteArrayInputStream(bytes), today))
+    }
+
+    @Test
     fun decodesIssTablesAndKeepsCouponSeparateFromRedemptionOnSameDay() {
         val raw = JSONTokener("""[
           {"charsetinfo":{"name":"utf-8"}},
@@ -341,6 +394,11 @@ class PortfolioTest {
         assertMoney("138620", onCoupon.points.last().value)
         assertMoney("1818", onCoupon.points.last().result)
         assertTrue(onCoupon.points.last().usesEstimatedValuation)
+
+        val flaggedData = data.copy(bonds = listOf(poliplast.copy(defaultStatus = BondDefaultStatus.TECHNICAL_DEFAULT)))
+        val unverified = PortfolioMath(flaggedData).overview(day(paid.date))
+        assertEquals(ValuationIssue.CouponUnverified(paid.date), unverified.holdings.single().issue)
+        assertNull(unverified.holdings.single().estimatedAccrued)
 
         val later = math.overview(day("2026-11-22"))
         assertMoney("0.53", later.holdings.single().estimatedAccrued)

@@ -6,6 +6,7 @@ import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.detectTapGestures
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -19,6 +20,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyListScope
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Button
 import androidx.compose.material3.FilterChip
@@ -65,6 +67,7 @@ fun PortfolioPage(data: Dashboard, busy: Boolean, refresh: () -> Unit, add: () -
     val holdings = total.holdings
     val unavailable = holdings.filter { it.issue != null }
     val estimatedCount = holdings.count { it.estimatedAccrued != null }
+    val defaultCount = holdings.count { it.bond.defaultStatus != null }
     var showValuationDetails by rememberSaveable(data.selectedAccount?.id) { mutableStateOf(false) }
     val trackedBonds = data.portfolio.trades.map { it.isin }.toSet()
     val closedBonds = data.portfolio.bonds.filter { it.isin in trackedBonds && holdings.none { h -> h.bond.isin == it.isin } }
@@ -87,6 +90,9 @@ fun PortfolioPage(data: Dashboard, busy: Boolean, refresh: () -> Unit, add: () -
                 }
                 if (estimatedCount > 0) {
                     Text("Позиции с расчётным НКД · $estimatedCount", color = Mint)
+                }
+                if (defaultCount > 0) {
+                    Text("Выпуски с признаками дефолта · $defaultCount", color = Mint)
                 }
                 if (total.valueIsPartial || estimatedCount > 0) {
                     TextButton(onClick = { showValuationDetails = true }) {
@@ -137,6 +143,7 @@ fun PortfolioPage(data: Dashboard, busy: Boolean, refresh: () -> Unit, add: () -
                         Text("$label ${dateLabel(it, short = true)}",
                             color = if (h.estimatedAccrued != null) Amber else Muted, style = MaterialTheme.typography.bodySmall)
                     }
+                    h.bond.defaultStatus?.let { Text(it.label, color = Amber, style = MaterialTheme.typography.bodySmall) }
                     h.issue?.let { Text(it.description(), color = Amber, style = MaterialTheme.typography.bodySmall) }
                 }
             }
@@ -290,15 +297,19 @@ private fun TradeRow(data: Dashboard, trade: Trade, edit: () -> Unit) {
     }
 }
 
-private enum class PayoutTab(val label: String) { EXPECTED("Ожидаются"), RECEIVED("Получены") }
+private enum class PayoutTab(val label: String, val status: PaymentStatus) {
+    EXPECTED("Ожидаются", PaymentStatus.PLANNED),
+    RECEIVED("Получены", PaymentStatus.BY_CALENDAR),
+    UNVERIFIED("Под проверкой", PaymentStatus.UNVERIFIED)
+}
 
 @Composable
 fun PaymentsPage(data: Dashboard, scopePicker: @Composable () -> Unit) {
     var tab by rememberSaveable { mutableStateOf(PayoutTab.EXPECTED) }
     val today = data.today.toString()
     val received = tab == PayoutTab.RECEIVED
-    val selected = if (received) data.payments.filter { it.date <= today }.sortedByDescending { it.date }
-    else data.payments.filter { it.date > today }.sortedBy { it.date }
+    val matching = data.payments.filter { data.math.paymentStatus(it, today) == tab.status }
+    val selected = if (tab == PayoutTab.EXPECTED) matching.sortedBy { it.date } else matching.sortedByDescending { it.date }
     val isMissing = data.portfolio.bonds.any { bond ->
         bond.calendarUpdatedAt == 0L && data.portfolio.trades.any { it.isin == bond.isin }
     }
@@ -306,7 +317,7 @@ fun PaymentsPage(data: Dashboard, scopePicker: @Composable () -> Unit) {
         item { PageHeader("Выплаты", "Купоны, амортизация и погашение") }
         item { scopePicker() }
         item {
-            Row(horizontalArrangement = Arrangement.spacedBy(5.dp)) {
+            Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(5.dp)) {
                 PayoutTab.entries.forEach { option -> FilterChip(tab == option, { tab = option }, { Text(option.label, maxLines = 1) }) }
             }
         }
@@ -333,6 +344,7 @@ fun PaymentsPage(data: Dashboard, scopePicker: @Composable () -> Unit) {
 @Composable
 private fun PaymentRow(data: Dashboard, payment: Payment) {
     val estimate = data.math.estimate(payment)
+    val status = data.math.paymentStatus(payment, data.today.toString())
     Sheet {
         Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(4.dp)) {
@@ -341,9 +353,16 @@ private fun PaymentRow(data: Dashboard, payment: Payment) {
             }
             Text(rubles(estimate.amount), fontWeight = FontWeight.SemiBold)
         }
-        Text(dateLabel(payment.date) +
+        val date = dateLabel(payment.date)
+        val dateText = if (status == PaymentStatus.BY_CALENDAR) date else "Плановая дата · $date"
+        Text(dateText +
             (payment.amountPerBond?.toBigDecimal()?.let { " · ${rubles(it)} / шт." } ?: " · сумма на бумагу пока неизвестна"),
             color = Muted)
+        if (status == PaymentStatus.UNVERIFIED) {
+            Text("Исполнение не подтверждено · сумма по календарю", color = Amber)
+        } else if (status == PaymentStatus.PLANNED) {
+            data.bondsByIsin[payment.isin]?.defaultStatus?.let { Text(it.label, color = Amber) }
+        }
         if (estimate.units == null) Text("Недостаточно данных об остатке бумаг", color = Amber)
         else if (payment.recordDate == null) {
             Text("${estimate.units} шт. по остатку на дату выплаты", color = Muted, style = MaterialTheme.typography.bodySmall)
@@ -364,6 +383,7 @@ fun BondDetails(data: Dashboard, bond: Bond, busy: Boolean, back: () -> Unit, re
         item {
             Sheet {
                 InfoRow("В портфеле", "${holding?.quantity ?: 0} шт.")
+                bond.defaultStatus?.let { InfoRow("Статус выпуска", it.label) }
                 InfoRow(if (holding?.estimatedAccrued != null) "Расчётная стоимость" else "Рыночная стоимость",
                     rubles(holding?.value))
                 holding?.issue?.let { Text(it.description(), color = Amber) }
@@ -372,12 +392,18 @@ fun BondDetails(data: Dashboard, bond: Bond, busy: Boolean, back: () -> Unit, re
                 InfoRow("Непогашенный номинал", rubles(bond.nominal?.toBigDecimalOrNull() ?: recent?.nominal?.toBigDecimalOrNull()))
                 InfoRow("НКД по последней котировке", rubles(recent?.accrued?.toBigDecimalOrNull()))
                 InfoRow("Дата последней котировки", dateLabel(recent?.date, true))
-                InfoRow("Погашение по данным биржи", dateLabel(bond.maturity, true))
+                InfoRow("Плановое погашение", dateLabel(bond.maturity, true))
                 InfoRow("Календарь обновлён", if (bond.calendarUpdatedAt > 0) instantLabel(bond.calendarUpdatedAt) else "Ещё не загружен")
                 TextButton(onClick = {
                     val ticker = Uri.encode(bond.secid.lowercase())
                     context.startActivity(Intent(Intent.ACTION_VIEW, "https://www.moex.com/ru/bonds/$ticker".toUri()))
                 }) { Text("Карточка на Мосбирже") }
+                if (bond.defaultStatus != null || bond.paymentsUnverifiedThrough != null) {
+                    TextButton(onClick = {
+                        context.startActivity(Intent(Intent.ACTION_VIEW,
+                            "https://www.moex.com/ru/listing/emidocs.aspx?pageNumber=0&type=4".toUri()))
+                    }) { Text("Реестр дефолтов Мосбиржи") }
+                }
             }
         }
         item { Button(onClick = add) { Glyph(Symbol.PLUS); Text("Добавить сделку") } }

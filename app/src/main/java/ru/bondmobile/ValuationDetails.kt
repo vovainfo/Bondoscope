@@ -23,9 +23,10 @@ internal fun ValuationIssue.description(): String = when (this) {
     ValuationIssue.NoQuote -> "Котировка по выпуску отсутствует"
     ValuationIssue.OldQuote -> "Последняя котировка старше $MAX_QUOTE_AGE_DAYS календарных дней"
     ValuationIssue.UnsupportedCurrency -> "Оценка в валюте этого выпуска недоступна"
-    ValuationIssue.Maturity -> "Наступила дата погашения. В календаре пока нет полного погашения этого выпуска"
+    ValuationIssue.Maturity -> "Наступила дата погашения · исполнение не подтверждено"
     ValuationIssue.NominalChanged -> "Номинал изменился после последней котировки"
     is ValuationIssue.AfterPayment -> "После последней котировки наступила дата выплаты по календарю · ${kind.label} ${dateLabel(date, true)}"
+    is ValuationIssue.CouponUnverified -> "Исполнение купона от ${dateLabel(date, true)} не подтверждено · нет актуальной котировки"
     is ValuationIssue.CouponAccrualUnknown -> "Недостаточно данных для расчёта НКД после купона ${dateLabel(date, true)}"
     is ValuationIssue.MissingFields -> "В данных на дату котировки нет " + fields.joinToString(", ") {
         when (it) {

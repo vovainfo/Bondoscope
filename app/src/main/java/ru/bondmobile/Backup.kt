@@ -20,7 +20,8 @@ object Backup {
                 obj("isin" to it.isin, "secid" to it.secid, "name" to it.name, "board" to it.board,
                     "maturity" to it.maturity, "currency" to it.currency, "nominal" to it.nominal,
                     "nominalDate" to it.nominalDate, "updatedAt" to it.updatedAt,
-                    "calendarUpdatedAt" to it.calendarUpdatedAt, "historyStart" to it.historyStart)
+                    "calendarUpdatedAt" to it.calendarUpdatedAt, "historyStart" to it.historyStart,
+                    "defaultStatus" to it.defaultStatus?.name, "paymentsUnverifiedThrough" to it.paymentsUnverifiedThrough)
             },
             "trades" to array(portfolio.trades) {
                 obj("id" to it.id, "isin" to it.isin, "side" to it.side.name, "quantity" to it.quantity,
@@ -65,7 +66,8 @@ object Backup {
             Bond(isin(), text("secid", 40), text("name", 300), optional("board", 25), day("maturity"),
                 optional("currency", 10), number("nominal"), day("nominalDate"),
                 optLong("updatedAt").coerceIn(0, System.currentTimeMillis()),
-                optLong("calendarUpdatedAt").coerceIn(0, System.currentTimeMillis()), day("historyStart"))
+                optLong("calendarUpdatedAt").coerceIn(0, System.currentTimeMillis()), day("historyStart"),
+                optional("defaultStatus", 24)?.let(BondDefaultStatus::valueOf), day("paymentsUnverifiedThrough"))
         }
         val trades = root.list("trades", 50_000) {
             val date = day("date") ?: error("В сделке пропущена дата")

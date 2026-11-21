@@ -53,15 +53,29 @@ class Moex {
         }
         val resolvedIsin = description["ISIN"]
         if (resolvedIsin != null && resolvedIsin != original.isin) throw IOException("ISIN выпуска не совпадает")
+        val status = readDefaultStatus(original, description["HASDEFAULT"], description["HASTECHNICALDEFAULT"], marketToday())
         return original.copy(
             secid = description["SECID"] ?: original.secid,
             name = description["SHORTNAME"] ?: description["NAME"] ?: original.name,
             board = primary?.str("boardid") ?: original.board,
             maturity = description["MATDATE"].asDate(),
             currency = description["FACEUNIT"] ?: primary?.str("currencyid") ?: original.currency,
-            updatedAt = System.currentTimeMillis()
+            updatedAt = System.currentTimeMillis(),
+            defaultStatus = status.defaultStatus,
+            paymentsUnverifiedThrough = status.paymentsUnverifiedThrough
         )
     }
+
+    internal fun readDefaultStatus(original: Bond, defaultFlag: String?, technicalFlag: String?, today: LocalDate): Bond =
+        when {
+            defaultFlag == "1" -> original.copy(defaultStatus = BondDefaultStatus.DEFAULT)
+            technicalFlag == "1" && (defaultFlag == "0" || original.defaultStatus != BondDefaultStatus.DEFAULT) ->
+                original.copy(defaultStatus = BondDefaultStatus.TECHNICAL_DEFAULT)
+            defaultFlag == "0" && technicalFlag == "0" && original.defaultStatus != null ->
+                original.copy(defaultStatus = null,
+                    paymentsUnverifiedThrough = maxOf(original.paymentsUnverifiedThrough.orEmpty(), today.toString()))
+            else -> original
+        }
 
     suspend fun placementDate(bond: Bond): LocalDate? = coroutineScope {
         suspend fun placementDetails(secid: String) = request(

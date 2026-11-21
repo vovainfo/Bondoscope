@@ -14,6 +14,10 @@ enum class PaymentKind(val label: String) {
     COUPON("Купон"), AMORTIZATION("Амортизация"), REDEMPTION("Погашение"),
     PRINCIPAL("Выплата номинала")
 }
+enum class BondDefaultStatus(val label: String) {
+    DEFAULT("Дефолт"), TECHNICAL_DEFAULT("Технический дефолт")
+}
+enum class PaymentStatus { PLANNED, BY_CALENDAR, UNVERIFIED }
 
 @Entity(tableName = "bonds")
 data class Bond(
@@ -27,8 +31,13 @@ data class Bond(
     val nominalDate: String? = null,
     val updatedAt: Long = 0,
     val calendarUpdatedAt: Long = 0,
-    val historyStart: String? = null
-)
+    val historyStart: String? = null,
+    val defaultStatus: BondDefaultStatus? = null,
+    val paymentsUnverifiedThrough: String? = null
+) {
+    fun requiresPaymentVerification(date: String): Boolean =
+        defaultStatus != null || paymentsUnverifiedThrough?.let { date <= it } == true
+}
 
 const val DEFAULT_PORTFOLIO_ID = "default"
 const val MAX_PORTFOLIO_NAME_LENGTH = 60
@@ -138,5 +147,6 @@ fun validQuantityHistory(trades: List<Trade>): Boolean = trades.groupBy { it.por
     }
 }
 
-fun Iterable<Payment>.redemptionDate(): String? = filter { it.isScheduled && it.kind == PaymentKind.REDEMPTION }
+fun Iterable<Payment>.redemptionDate(bond: Bond? = null): String? =
+    filter { it.isScheduled && it.kind == PaymentKind.REDEMPTION && bond?.requiresPaymentVerification(it.date) != true }
     .minOfOrNull { it.date }
