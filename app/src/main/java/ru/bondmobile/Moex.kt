@@ -3,6 +3,7 @@ package ru.bondmobile
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
 import org.json.JSONArray
 import org.json.JSONObject
@@ -16,6 +17,14 @@ import java.util.Locale
 import javax.net.ssl.HttpsURLConnection
 
 data class BondCalendar(val payments: List<Payment>, val complete: Boolean)
+
+internal data class PlacementBoard(
+    val secid: String,
+    val id: String,
+    val market: String,
+    val firstHistoryDate: String,
+    val lastHistoryDate: String?
+)
 
 class Moex {
     suspend fun search(text: String): List<Bond> {
@@ -54,31 +63,53 @@ class Moex {
         )
     }
 
-    suspend fun placementDate(bond: Bond): LocalDate? {
+    suspend fun placementDate(bond: Bond): LocalDate? = coroutineScope {
         suspend fun placementDetails(secid: String) = request(
             "/securities/${segment(secid)}.json", "iss.only" to "description,boards",
-            "description.columns" to "name,value", "boards.columns" to "engine,title,history_from,listed_from"
+            "description.columns" to "name,value", "boards.columns" to "secid,engine,market,boardid,title,history_from,history_till"
         )
 
-        val raw = placementDetails(bond.secid)
-        if (bond.secid != bond.isin || table(raw, "description").isNotEmpty()) {
-            return decodePlacementDate(raw, bond.isin)
-        }
+        val original = placementDetails(bond.secid)
+        val raw = if (bond.secid == bond.isin && table(original, "description").isEmpty()) {
+            val secid = search(bond.isin).firstOrNull { it.isin == bond.isin && it.secid != bond.secid }?.secid
+                ?: return@coroutineScope null
+            placementDetails(secid)
+        } else original
 
-        val secid = search(bond.isin).firstOrNull { it.isin == bond.isin && it.secid != bond.secid }?.secid
-            ?: return null
-        return decodePlacementDate(placementDetails(secid), bond.isin)
+        decodePlacementBoards(raw, bond.isin).map { board ->
+            async {
+                val path = "/history/engines/stock/markets/${segment(board.market)}/boards/" +
+                    "${segment(board.id)}/securities/${segment(board.secid)}.json"
+                val window = buildList {
+                    add("from" to board.firstHistoryDate)
+                    board.lastHistoryDate?.let { add("till" to it) }
+                    add("history.columns" to "SECID,BOARDID,TRADEDATE,NUMTRADES")
+                }
+                decodePlacementTradeDate(pages(path, "history", *window.toTypedArray()), board)
+            }
+        }.awaitAll().filterNotNull().minOrNull()
     }
 
-    internal fun decodePlacementDate(raw: Any, isin: String): LocalDate? {
+    internal fun decodePlacementBoards(raw: Any, isin: String): List<PlacementBoard> {
         val issue = table(raw, "description").firstOrNull { it.str("name").equals("ISIN", ignoreCase = true) }
-        if (issue?.str("value") != isin) return null
+        if (issue?.str("value") != isin) return emptyList()
 
-        return table(raw, "boards").asSequence()
+        return table(raw, "boards")
             .filter { it.str("engine") == "stock" && it.str("title")?.startsWith("Размещение", ignoreCase = true) == true }
-            .mapNotNull { it.str("history_from").asDate() ?: it.str("listed_from").asDate() }
-            .minOrNull()?.let(LocalDate::parse)
+            .mapNotNull { row ->
+                val secid = row.str("secid") ?: return@mapNotNull null
+                val id = row.str("boardid") ?: return@mapNotNull null
+                val market = row.str("market") ?: return@mapNotNull null
+                val from = row.str("history_from").asDate() ?: return@mapNotNull null
+                PlacementBoard(secid, id, market, from, row.str("history_till").asDate())
+            }.distinctBy { Triple(it.secid, it.market, it.id) }
     }
+
+    internal fun decodePlacementTradeDate(rows: List<JSONObject>, board: PlacementBoard): LocalDate? = rows.asSequence()
+        .filter { it.str("SECID") == board.secid && it.str("BOARDID") == board.id &&
+            (it.str("NUMTRADES")?.toLongOrNull() ?: 0L) > 0L }
+        .mapNotNull { it.str("TRADEDATE").asDate() }
+        .minOrNull()?.let(LocalDate::parse)
 
     suspend fun current(bond: Bond): Pair<Bond, Quote?> {
         val board = bond.board ?: return bond to null

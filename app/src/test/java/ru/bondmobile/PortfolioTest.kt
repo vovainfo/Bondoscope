@@ -105,21 +105,40 @@ class PortfolioTest {
     }
 
     @Test
-    fun usesEarliestPlacementSessionInsteadOfTradingOrBuybackDates() {
+    fun usesExecutedPlacementTradesAfterTheOrderCollectionPeriod() {
+        val placementIsin = "RU000A10GDW3"
         val raw = JSONObject("""{
-          "description":{"columns":["name","value"],"data":[["ISIN","RU000A1074G2"],["ISSUEDATE","2023-10-25"]]},
-          "boards":{"columns":["engine","title","history_from","listed_from"],"data":[
-            ["stock","Т+: Облигации","2023-10-25","2023-10-25"],
-            ["stock","Выкуп - адрес.","2023-10-30","2023-10-30"],
-            ["stock","Размещение - адрес.","2024-06-26","2024-06-26"],
-            ["stock","Размещение: Аукцион - безадрес.","2023-11-01","2023-11-01"]
+          "description":{"columns":["name","value"],"data":[["ISIN","$placementIsin"],["STARTDATEMOEX","2026-11-11"]]},
+          "boards":{"columns":["secid","boardid","engine","market","title","history_from","history_till","listed_from"],"data":[
+            ["$placementIsin","TQCB","stock","bonds","Т+: Облигации - безадрес.","2026-11-11","2026-11-20","2026-11-11"],
+            ["$placementIsin","PSAU","stock","ndm","Размещение - адрес.","2026-10-27","2026-11-11","2026-10-27"],
+            ["$placementIsin","PACT","stock","ndm","Размещение: Аукцион",null,null,"2026-10-27"]
           ]}
         }""")
+        val history = JSONObject("""{"history":{"columns":["SECID","BOARDID","TRADEDATE","NUMTRADES"],"data":[
+            ["$placementIsin","PSAU","2026-10-27",0],
+            ["$placementIsin","PSAU","2026-11-10",0],
+            ["$placementIsin","PSAU","2026-11-11",16155]
+        ]}}""")
         val moex = Moex()
-        assertEquals(day("2023-11-01"), moex.decodePlacementDate(raw, "RU000A1074G2"))
-        assertNull(moex.decodePlacementDate(raw, isin))
+        val board = moex.decodePlacementBoards(raw, placementIsin).single()
+        assertEquals(PlacementBoard(placementIsin, "PSAU", "ndm", "2026-10-27", "2026-11-11"), board)
+        val rows = Moex.table(history, "history")
+        val placementDate = moex.decodePlacementTradeDate(rows, board)
+        assertEquals(day("2026-11-11"), placementDate)
+        assertNull(moex.decodePlacementTradeDate(rows.dropLast(1), board))
+        assertNull(moex.decodePlacementTradeDate(rows, board.copy(id = "TQCB")))
+        assertTrue(moex.decodePlacementBoards(raw, isin).isEmpty())
         raw.remove("boards")
-        assertNull(moex.decodePlacementDate(raw, "RU000A1074G2"))
+        assertTrue(moex.decodePlacementBoards(raw, placementIsin).isEmpty())
+
+        val purchase = Trade("placed", placementIsin, TradeSide.BUY, 74, "2026-10-27", null,
+            PriceUnit.PERCENT, "100", null, null, "0")
+        val quote = Quote(placementIsin, "2026-11-11", "100.09", "1000", "0")
+        val math = PortfolioMath(Portfolio(listOf(Bond(placementIsin, placementIsin, "СБСекр7АС")),
+            listOf(purchase), quotes = listOf(quote)))
+        assertNull(math.tradeValue(purchase))
+        assertMoney("-74000", math.tradeValue(purchase.copy(date = requireNotNull(placementDate).toString())))
     }
 
     @Test
@@ -162,6 +181,63 @@ class PortfolioTest {
         assertTrue(asOfJanuary.getValue(january).incomplete)
         assertMoney("1800", math.monthlyReceipts(day("2026-02-02")).getValue(february).principal)
         assertFalse(math.paymentCandidates().any { it.id == manual.id })
+    }
+
+    @Test
+    fun scopesChartsAndTotalsAndCombinesTheSameIssueWithoutDuplicatingThePayment() {
+        val reserve = NamedPortfolio("reserve", "Резерв")
+        val buy = Trade("a-buy", isin, TradeSide.BUY, 5, "2025-06-02", null, PriceUnit.RUB_WITH_ACCRUED,
+            "900", null, null, "0")
+        val sell = buy.copy(id = "a-sell", side = TradeSide.SELL, quantity = 2, date = "2025-06-05", price = "1000")
+        val secondBuy = buy.copy(id = "b-buy", quantity = 7, date = "2025-06-03", price = "960", portfolioId = reserve.id)
+        val coupon = Payment("coupon", isin, PaymentKind.COUPON, "2025-06-06", "2025-06-04", "20")
+        val data = Portfolio(listOf(bond), listOf(buy, sell, secondBuy), listOf(coupon),
+            listOf(Quote(isin, "2025-06-06", "100", "1000", "0")), listOf(defaultPortfolio, reserve))
+        val today = day("2025-06-06")
+        val first = PortfolioMath(data.scoped(DEFAULT_PORTFOLIO_ID))
+        val second = PortfolioMath(data.scoped(reserve.id))
+        val all = PortfolioMath(data.scoped(null))
+        assertEquals(3L, first.overview(today).holdings.single().quantity)
+        assertEquals(7L, second.overview(today).holdings.single().quantity)
+        assertEquals(10L, all.overview(today).holdings.single().quantity)
+        assertMoney("3000", first.overview(today).points.last().value)
+        assertMoney("7000", second.overview(today).points.last().value)
+        assertMoney("10000", all.overview(today).points.last().value)
+        assertMoney("600", first.overview(today).points.last().result)
+        assertMoney("420", second.overview(today).points.last().result)
+        assertMoney("1020", all.overview(today).points.last().result)
+        assertMoney("100", first.monthlyReceipts(today).values.single().coupons)
+        assertMoney("140", second.monthlyReceipts(today).values.single().coupons)
+        assertMoney("240", all.monthlyReceipts(today).values.single().coupons)
+        assertEquals(1, all.paymentCandidates().size)
+        assertTrue(data.scoped("empty").trades.isEmpty())
+    }
+
+    @Test
+    fun anotherPortfolioCannotCoverAnUnmatchedSale() {
+        val buy = Trade("buy", isin, TradeSide.BUY, 10, "2025-05-02", null, PriceUnit.RUB_WITH_ACCRUED,
+            "1000", null, null, "0")
+        val sale = buy.copy(id = "sale", side = TradeSide.SELL, quantity = 3, date = "2025-05-05", portfolioId = "other")
+        assertFalse(validQuantityHistory(listOf(buy, sale)))
+        assertTrue(validQuantityHistory(listOf(buy.copy(portfolioId = "other"), sale)))
+    }
+
+    @Test
+    fun backupPreservesNamedPortfoliosAndRestoresLegacyTradesToDefault() {
+        val reserve = NamedPortfolio("reserve", "Резерв")
+        val buy = Trade("buy", isin, TradeSide.BUY, 2, "2025-05-02", null, PriceUnit.RUB_WITH_ACCRUED,
+            "1000.63", null, null, "0", reserve.id)
+        val portfolio = Portfolio(listOf(bond), listOf(buy), accounts = listOf(defaultPortfolio, reserve))
+        val json = ByteArrayOutputStream().apply { Backup.write(portfolio, this) }.toByteArray()
+        assertEquals(portfolio, Backup.read(ByteArrayInputStream(json), day("2025-05-09")))
+        val legacy = JSONObject(String(json, Charsets.UTF_8)).apply {
+            put("version", 1)
+            remove("portfolios")
+            getJSONArray("trades").getJSONObject(0).remove("portfolioId")
+        }
+        val restored = Backup.read(ByteArrayInputStream(legacy.toString().toByteArray()), day("2025-05-09"))
+        assertEquals(listOf(defaultPortfolio), restored.accounts)
+        assertEquals(DEFAULT_PORTFOLIO_ID, restored.trades.single().portfolioId)
     }
 
     private fun assertMoney(expected: String, actual: BigDecimal?) {

@@ -1,6 +1,7 @@
 package ru.bondmobile
 
 import androidx.room.Entity
+import androidx.room.ForeignKey
 import androidx.room.Index
 import androidx.room.PrimaryKey
 import java.math.BigDecimal
@@ -29,7 +30,18 @@ data class Bond(
     val historyStart: String? = null
 )
 
-@Entity(tableName = "trades", indices = [Index("isin")])
+const val DEFAULT_PORTFOLIO_ID = "default"
+const val MAX_PORTFOLIO_NAME_LENGTH = 60
+val defaultPortfolio = NamedPortfolio(DEFAULT_PORTFOLIO_ID, "Основной")
+
+@Entity(tableName = "portfolios")
+data class NamedPortfolio(@PrimaryKey val id: String, val name: String)
+
+@Entity(
+    tableName = "trades",
+    indices = [Index("isin"), Index(value = ["portfolioId", "isin"])],
+    foreignKeys = [ForeignKey(entity = NamedPortfolio::class, parentColumns = ["id"], childColumns = ["portfolioId"])]
+)
 data class Trade(
     @PrimaryKey val id: String,
     val isin: String,
@@ -41,7 +53,8 @@ data class Trade(
     val price: String,
     val nominal: String?,
     val accrued: String?,
-    val fee: String
+    val fee: String,
+    val portfolioId: String = DEFAULT_PORTFOLIO_ID
 ) {
     fun cashFlow(nominalOverride: BigDecimal? = null, accruedOverride: BigDecimal? = null): BigDecimal? {
         val priceValue = price.toBigDecimal()
@@ -90,8 +103,17 @@ data class Portfolio(
     val bonds: List<Bond> = emptyList(),
     val trades: List<Trade> = emptyList(),
     val payments: List<Payment> = emptyList(),
-    val quotes: List<Quote> = emptyList()
-)
+    val quotes: List<Quote> = emptyList(),
+    val accounts: List<NamedPortfolio> = listOf(defaultPortfolio)
+) {
+    fun scoped(portfolioId: String?): Portfolio {
+        if (portfolioId == null) return this
+        val selected = trades.filter { it.portfolioId == portfolioId }
+        val issues = selected.map { it.isin }.toSet()
+        return copy(bonds = bonds.filter { it.isin in issues }, trades = selected,
+            payments = payments.filter { it.isin in issues }, quotes = quotes.filter { it.isin in issues })
+    }
+}
 
 val isinPattern = Regex("[A-Z]{2}[A-Z0-9]{9}[0-9]")
 const val MAX_QUANTITY = 1_000_000_000
@@ -107,7 +129,7 @@ fun String.decimalOrNull(): BigDecimal? = trim().replace(" ", "").replace("\u00a
 
 fun String.isRubles(): Boolean = uppercase() in setOf("RUB", "SUR", "RUR")
 
-fun validQuantityHistory(trades: List<Trade>): Boolean = trades.groupBy { it.isin }.values.all { transactions ->
+fun validQuantityHistory(trades: List<Trade>): Boolean = trades.groupBy { it.portfolioId to it.isin }.values.all { transactions ->
     val byDate = transactions.groupBy { it.date }.toSortedMap()
     var balance = 0L
     byDate.values.all { daily ->

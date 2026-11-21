@@ -8,9 +8,11 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.selection.toggleable
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.Checkbox
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.LinearProgressIndicator
@@ -30,6 +32,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalFocusManager
+import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
@@ -43,7 +46,8 @@ import java.util.UUID
 data class TradeDraft(val bond: Bond? = null, val trade: Trade? = null)
 
 @Composable
-fun TradeEditor(model: PortfolioViewModel, draft: TradeDraft, local: List<Bond>, onClose: () -> Unit) {
+fun TradeEditor(model: PortfolioViewModel, draft: TradeDraft, local: List<Bond>, accounts: List<NamedPortfolio>,
+                initialPortfolioId: String, onClose: () -> Unit) {
     val existing = draft.trade
     val today = marketToday()
     val search by model.searchState.collectAsStateWithLifecycle()
@@ -52,6 +56,8 @@ fun TradeEditor(model: PortfolioViewModel, draft: TradeDraft, local: List<Bond>,
     var query by rememberSaveable { mutableStateOf("") }
     var side by rememberSaveable { mutableStateOf(existing?.side ?: TradeSide.BUY) }
     var quantity by rememberSaveable { mutableStateOf(existing?.quantity?.toString().orEmpty()) }
+    var portfolioId by rememberSaveable { mutableStateOf(existing?.portfolioId ?: initialPortfolioId) }
+    var moveIssue by rememberSaveable { mutableStateOf(false) }
     var day by rememberSaveable { mutableStateOf(existing?.date ?: today.toString()) }
     var settlement by rememberSaveable { mutableStateOf(existing?.settlement) }
     var unit by rememberSaveable { mutableStateOf(existing?.unit ?: PriceUnit.PERCENT) }
@@ -92,7 +98,7 @@ fun TradeEditor(model: PortfolioViewModel, draft: TradeDraft, local: List<Bond>,
 
         when {
             placement == null || placement < earliestDate ->
-                iboMessage = "Дата размещения недоступна. Укажите дату сделки вручную."
+                iboMessage = "Дата заключённой сделки на размещении недоступна. Укажите дату из брокерского отчёта."
             placement > today ->
                 iboMessage = "Размещение запланировано на ${dateLabel(placement.toString())}. Укажите дату состоявшейся сделки."
             else -> changeTradeDate(placement.toString())
@@ -105,6 +111,21 @@ fun TradeEditor(model: PortfolioViewModel, draft: TradeDraft, local: List<Bond>,
         title = { Text(if (existing == null) "Добавить сделку" else "Изменить сделку") },
         text = {
             EditorFields {
+                Text("Портфель сделки", color = Muted, style = MaterialTheme.typography.bodySmall)
+                PortfolioSelector(accounts, portfolioId, onSelect = { id ->
+                    if (id != null) {
+                        portfolioId = id
+                        moveIssue = false
+                        error = null
+                    }
+                }, allowAll = false)
+                if (existing != null && existing.portfolioId != portfolioId) {
+                    Row(Modifier.fillMaxWidth().toggleable(moveIssue, role = Role.Checkbox, onValueChange = { moveIssue = it }),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
+                        Checkbox(moveIssue, onCheckedChange = null)
+                        Text("Перенести все сделки этого выпуска")
+                    }
+                }
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     FilterChip(side == TradeSide.BUY, { side = TradeSide.BUY }, { Text("Покупка") })
                     FilterChip(side == TradeSide.SELL, { side = TradeSide.SELL; resetIbo() }, { Text("Продажа") })
@@ -150,13 +171,15 @@ fun TradeEditor(model: PortfolioViewModel, draft: TradeDraft, local: List<Bond>,
                         resetIbo()
                         changeTradeDate(value)
                     })
-                    if (existing == null && side == TradeSide.BUY) {
+                    if (side == TradeSide.BUY) {
                         OutlinedButton(enabled = bond != null && !saving && iboRequest == null, onClick = {
                             focus.clearFocus()
                             error = null
                             iboMessage = null
-                            unit = PriceUnit.PERCENT
-                            price = "100"
+                            if (existing == null) {
+                                unit = PriceUnit.PERCENT
+                                price = "100"
+                            }
                             iboRequest = bond
                         }) { Text("IBO") }
                     }
@@ -212,8 +235,8 @@ fun TradeEditor(model: PortfolioViewModel, draft: TradeDraft, local: List<Bond>,
                     val trade = Trade(id, bond.isin, side, units, day, settlement, unit, enteredPrice.toPlainString(),
                         enteredNominal?.toPlainString()?.takeIf { unit == PriceUnit.PERCENT },
                         enteredAccrued?.toPlainString()?.takeUnless { unit == PriceUnit.RUB_WITH_ACCRUED },
-                        enteredFee?.toPlainString() ?: "0")
-                    model.saveTrade(bond, trade) { reason ->
+                        enteredFee?.toPlainString() ?: "0", portfolioId)
+                    model.saveTrade(bond, trade, moveIssue) { reason ->
                         saving = false
                         if (reason == null) close() else error = reason
                     }

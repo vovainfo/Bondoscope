@@ -8,7 +8,9 @@ import androidx.room.Query
 import androidx.room.Room
 import androidx.room.RoomDatabase
 import androidx.room.Upsert
+import androidx.room.migration.Migration
 import androidx.room.withTransaction
+import androidx.sqlite.db.SupportSQLiteDatabase
 import androidx.work.Constraints
 import androidx.work.CoroutineWorker
 import androidx.work.ExistingPeriodicWorkPolicy
@@ -19,21 +21,18 @@ import androidx.work.WorkerParameters
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
-import kotlinx.coroutines.flow.Flow
-import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.supervisorScope
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import java.time.LocalDate
+import java.util.UUID
 import java.util.concurrent.TimeUnit
 
 @Dao
 interface PortfolioDao {
-    @Query("SELECT * FROM bonds") fun watchBonds(): Flow<List<Bond>>
-    @Query("SELECT * FROM trades") fun watchTrades(): Flow<List<Trade>>
-    @Query("SELECT * FROM payments") fun watchPayments(): Flow<List<Payment>>
-    @Query("SELECT * FROM quotes") fun watchQuotes(): Flow<List<Quote>>
+    @Query("SELECT * FROM portfolios ORDER BY name COLLATE NOCASE, id") suspend fun accounts(): List<NamedPortfolio>
     @Query("SELECT * FROM bonds") suspend fun bonds(): List<Bond>
     @Query("SELECT * FROM bonds WHERE isin = :isin") suspend fun bond(isin: String): Bond?
     @Query("SELECT * FROM trades") suspend fun trades(): List<Trade>
@@ -44,7 +43,7 @@ interface PortfolioDao {
     suspend fun recentQuotes(isin: String, from: String): List<Quote>
 
     @Upsert suspend fun writeBond(value: Bond)
-    @Upsert suspend fun writeTrade(value: Trade)
+    @Upsert suspend fun writeAccount(value: NamedPortfolio)
     @Upsert suspend fun writeTrades(values: List<Trade>)
     @Upsert suspend fun writePayments(values: List<Payment>)
     @Upsert suspend fun writeQuotes(values: List<Quote>)
@@ -52,14 +51,45 @@ interface PortfolioDao {
     @Query("DELETE FROM payments WHERE id = :id") suspend fun deletePayment(id: String)
 }
 
-@Database(entities = [Bond::class, Trade::class, Payment::class, Quote::class], version = 1)
+@Database(entities = [Bond::class, Trade::class, Payment::class, Quote::class, NamedPortfolio::class], version = 2)
 abstract class BondDatabase : RoomDatabase() {
     abstract fun portfolio(): PortfolioDao
 }
 
+private fun seedDefaultPortfolio(db: SupportSQLiteDatabase) {
+    db.execSQL("INSERT INTO portfolios (id, name) VALUES (?, ?)", arrayOf(defaultPortfolio.id, defaultPortfolio.name))
+}
+
+internal val migratePortfolios = object : Migration(1, 2) {
+    override fun migrate(db: SupportSQLiteDatabase) {
+        db.execSQL("CREATE TABLE portfolios (id TEXT NOT NULL PRIMARY KEY, name TEXT NOT NULL)")
+        seedDefaultPortfolio(db)
+        db.execSQL("""
+            CREATE TABLE trades_new (
+                id TEXT NOT NULL PRIMARY KEY, isin TEXT NOT NULL, side TEXT NOT NULL,
+                quantity INTEGER NOT NULL, date TEXT NOT NULL, settlement TEXT, unit TEXT NOT NULL,
+                price TEXT NOT NULL, nominal TEXT, accrued TEXT, fee TEXT NOT NULL, portfolioId TEXT NOT NULL,
+                FOREIGN KEY(portfolioId) REFERENCES portfolios(id) ON UPDATE NO ACTION ON DELETE NO ACTION
+            )
+        """.trimIndent())
+        db.execSQL("""
+            INSERT INTO trades_new (id, isin, side, quantity, date, settlement, unit, price, nominal, accrued, fee, portfolioId)
+            SELECT id, isin, side, quantity, date, settlement, unit, price, nominal, accrued, fee, ? FROM trades
+        """.trimIndent(), arrayOf(DEFAULT_PORTFOLIO_ID))
+        db.execSQL("DROP TABLE trades")
+        db.execSQL("ALTER TABLE trades_new RENAME TO trades")
+        db.execSQL("CREATE INDEX index_trades_isin ON trades (isin)")
+        db.execSQL("CREATE INDEX index_trades_portfolioId_isin ON trades (portfolioId, isin)")
+    }
+}
+
 class BondApplication : Application() {
     val repository by lazy {
-        PortfolioRepository(Room.databaseBuilder(this, BondDatabase::class.java, "portfolio.db").build())
+        PortfolioRepository(Room.databaseBuilder(this, BondDatabase::class.java, "portfolio.db")
+            .addMigrations(migratePortfolios)
+            .addCallback(object : RoomDatabase.Callback() {
+                override fun onCreate(db: SupportSQLiteDatabase) = seedDefaultPortfolio(db)
+            }).build())
     }
 
     override fun onCreate() {
@@ -83,10 +113,22 @@ data class BondSearch(val matches: List<Bond>, val offline: Boolean)
 class PortfolioRepository(private val database: BondDatabase, private val moex: Moex = Moex()) {
     private val dao = database.portfolio()
     private val refreshLock = Mutex()
-    val portfolio = combine(dao.watchBonds(), dao.watchTrades(), dao.watchPayments(), dao.watchQuotes(), ::Portfolio)
+    val portfolio = database.invalidationTracker.createFlow("bonds", "trades", "payments", "quotes", "portfolios")
+        .map { snapshot() }
 
     suspend fun snapshot(): Portfolio = database.withTransaction {
-        Portfolio(dao.bonds(), dao.trades(), dao.payments(), dao.quotes())
+        Portfolio(dao.bonds(), dao.trades(), dao.payments(), dao.quotes(), dao.accounts())
+    }
+
+    suspend fun savePortfolio(id: String?, name: String): NamedPortfolio = database.withTransaction {
+        val trimmed = name.trim()
+        require(trimmed.isNotBlank() && trimmed.length <= MAX_PORTFOLIO_NAME_LENGTH) { "Введите название портфеля" }
+        val accounts = dao.accounts()
+        require(id == null || accounts.any { it.id == id }) { "Портфель не найден" }
+        require(accounts.none { it.id != id && it.name.equals(trimmed, ignoreCase = true) }) {
+            "Портфель с этим названием уже существует"
+        }
+        NamedPortfolio(id ?: UUID.randomUUID().toString(), trimmed).also { dao.writeAccount(it) }
     }
 
     suspend fun search(query: String): BondSearch = withContext(Dispatchers.IO) {
@@ -101,17 +143,24 @@ class PortfolioRepository(private val database: BondDatabase, private val moex: 
 
     suspend fun placementDate(bond: Bond): LocalDate? = withContext(Dispatchers.IO) { moex.placementDate(bond) }
 
-    suspend fun saveTrade(bond: Bond, trade: Trade) = database.withTransaction {
+    suspend fun saveTrade(bond: Bond, trade: Trade, moveIssue: Boolean = false) = database.withTransaction {
         require(bond.currency == null || bond.currency.isRubles()) { "Первая версия поддерживает рублёвые облигации" }
+        require(dao.accounts().any { it.id == trade.portfolioId }) { "Выберите портфель" }
         if (trade.side == TradeSide.SELL) {
             require(dao.bond(bond.isin) != null) { "Сначала добавьте покупку этого выпуска" }
         }
-        val allTrades = dao.trades().filter { it.id != trade.id } + trade
-        require(validQuantityHistory(allTrades)) { "Проверьте остаток бумаг и даты операций" }
+        val current = dao.trades()
+        val original = current.find { it.id == trade.id }
+        val related = if (moveIssue && original != null && original.portfolioId != trade.portfolioId) {
+            current.filter { it.id != trade.id && it.isin == original.isin && it.portfolioId == original.portfolioId }
+        } else emptyList()
+        val changes = (related.map { it.copy(portfolioId = trade.portfolioId) } + trade).associateBy { it.id }
+        val allTrades = current.filterNot { it.id in changes } + changes.values
+        require(validQuantityHistory(allTrades)) { "Проверьте положительный остаток и даты операций в каждом портфеле" }
         val redemption = dao.payments(bond.isin).redemptionDate()
         require(redemption == null || trade.date <= redemption) { "Дата сделки позже погашения по календарю" }
         if (dao.bond(bond.isin) == null) dao.writeBond(bond)
-        dao.writeTrade(trade)
+        dao.writeTrades(changes.values.toList())
     }
 
     suspend fun deleteTrade(id: String) = database.withTransaction {
@@ -121,14 +170,30 @@ class PortfolioRepository(private val database: BondDatabase, private val moex: 
     }
 
     suspend fun mergeBackup(imported: Portfolio) = database.withTransaction {
-        val local = Portfolio(dao.bonds(), dao.trades(), dao.payments(), dao.quotes())
+        val local = snapshot()
         val localTrades = local.trades.associateBy { it.id }
         val localPayments = local.payments.associateBy { it.id }
-        require(imported.trades.none { localTrades[it.id]?.let { old -> old != it } == true }) {
+        require(imported.trades.none { incoming ->
+            localTrades[incoming.id]?.let { old -> old.copy(portfolioId = incoming.portfolioId) != incoming } == true
+        }) {
             "В копии есть изменённая версия уже существующей сделки. Сверьте файлы или восстановите на чистой установке."
         }
         val allTrades = (local.trades + imported.trades).distinctBy { it.id }
         require(validQuantityHistory(allTrades)) { "Импорт привёл бы к отрицательному или недопустимому остатку" }
+        val accounts = local.accounts.associateBy { it.id }.toMutableMap()
+        for (incoming in imported.accounts) {
+            val isPlaceholder = incoming.id == DEFAULT_PORTFOLIO_ID && local.accounts == listOf(defaultPortfolio) && local.trades.isEmpty()
+            if (incoming.id in accounts && !isPlaceholder) continue
+            var name = incoming.name
+            var number = 2
+            while (accounts.values.any { it.id != incoming.id && it.name.equals(name, ignoreCase = true) }) {
+                val suffix = " (${number++})"
+                name = incoming.name.take(MAX_PORTFOLIO_NAME_LENGTH - suffix.length) + suffix
+            }
+            val account = incoming.copy(name = name)
+            accounts[account.id] = account
+            dao.writeAccount(account)
+        }
         val knownBonds = local.bonds.map { it.isin }.toSet()
         imported.bonds.filter { it.isin !in knownBonds }.forEach { dao.writeBond(it) }
         dao.writeTrades(imported.trades.filter { it.id !in localTrades })

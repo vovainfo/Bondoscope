@@ -1,6 +1,7 @@
 package ru.bondmobile
 
 import android.app.Application
+import android.content.Context
 import android.net.Uri
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
@@ -23,19 +24,25 @@ import java.time.LocalDate
 import java.time.ZonedDateTime
 
 data class Dashboard(
-    val portfolio: Portfolio,
-    val today: LocalDate = marketToday()
+    val allPortfolio: Portfolio,
+    val today: LocalDate = marketToday(),
+    val selectedId: String? = null
 ) {
+    val selectedAccount = allPortfolio.accounts.find { it.id == selectedId }
+    val portfolio = allPortfolio.scoped(selectedAccount?.id)
     val math = PortfolioMath(portfolio)
     val overview = math.overview(today)
     val payments = math.paymentCandidates()
     val monthlyReceipts = math.monthlyReceipts(today)
     val bondsByIsin = portfolio.bonds.associateBy { it.isin }
+    val accountsById = allPortfolio.accounts.associateBy { it.id }
 }
 
 class PortfolioViewModel(app: Application) : AndroidViewModel(app) {
     private val repository = (app as BondApplication).repository
     private val resolver = app.contentResolver
+    private val preferences = app.getSharedPreferences("portfolio-selection", Context.MODE_PRIVATE)
+    private val selectedPortfolio = MutableStateFlow(preferences.getString("id", null))
     private val _busy = MutableStateFlow(false)
     private val _message = MutableStateFlow<String?>(null)
     private val _preview = MutableStateFlow<Portfolio?>(null)
@@ -53,12 +60,22 @@ class PortfolioViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
-    val dashboard = combine(repository.portfolio, marketDates, ::Dashboard).flowOn(Dispatchers.Default)
+    val dashboard = combine(repository.portfolio, marketDates, selectedPortfolio, ::Dashboard).flowOn(Dispatchers.Default)
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), Dashboard(Portfolio()))
     val busy = _busy.asStateFlow()
     val message = _message.asStateFlow()
     val preview = _preview.asStateFlow()
     val searchState = _searchState.asStateFlow()
+
+    fun selectPortfolio(id: String?) {
+        selectedPortfolio.value = id
+        preferences.edit().putString("id", id).apply()
+    }
+
+    fun savePortfolio(id: String?, name: String, finished: (String?) -> Unit) = action(finished) {
+        val saved = repository.savePortfolio(id, name)
+        selectPortfolio(saved.id)
+    }
 
     fun refresh(isin: String? = null, quiet: Boolean = false) {
         if (refreshJob?.isActive == true) {
@@ -105,8 +122,8 @@ class PortfolioViewModel(app: Application) : AndroidViewModel(app) {
 
     suspend fun placementDate(bond: Bond): LocalDate? = repository.placementDate(bond)
 
-    fun saveTrade(bond: Bond, trade: Trade, finished: (String?) -> Unit) = action(finished) {
-        repository.saveTrade(bond, trade)
+    fun saveTrade(bond: Bond, trade: Trade, moveIssue: Boolean, finished: (String?) -> Unit) = action(finished) {
+        repository.saveTrade(bond, trade, moveIssue)
         refresh(bond.isin, quiet = true)
     }
 
@@ -124,7 +141,7 @@ class PortfolioViewModel(app: Application) : AndroidViewModel(app) {
     fun import() {
         val data = _preview.value ?: return
         _preview.value = null
-        action({ _message.value = it ?: "Портфель восстановлен" }) { repository.mergeBackup(data) }
+        action({ _message.value = it ?: "Резервная копия восстановлена" }) { repository.mergeBackup(data) }
     }
 
     fun export(uri: Uri) = action({ _message.value = it ?: "Резервная копия сохранена" }) {

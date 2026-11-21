@@ -62,6 +62,13 @@ private fun BondApp(model: PortfolioViewModel, updates: UpdateViewModel) {
     var page by rememberSaveable { mutableStateOf(Page.PORTFOLIO) }
     var details by rememberSaveable { mutableStateOf<String?>(null) }
     var editor by remember { mutableStateOf<TradeDraft?>(null) }
+    var namingPortfolio by rememberSaveable { mutableStateOf(false) }
+    var renameId by rememberSaveable { mutableStateOf<String?>(null) }
+    val scopePicker: @Composable () -> Unit = {
+        PortfolioSelector(data.allPortfolio.accounts, data.selectedAccount?.id, model::selectPortfolio,
+            onCreate = { renameId = null; namingPortfolio = true },
+            onRename = { renameId = it.id; namingPortfolio = true })
+    }
     val export = rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("application/json")) {
         it?.let(model::export)
     }
@@ -102,13 +109,13 @@ private fun BondApp(model: PortfolioViewModel, updates: UpdateViewModel) {
                     { editor = TradeDraft(bond, null) }, { editor = TradeDraft(bond, it) })
             } else when (page) {
                 Page.PORTFOLIO -> PortfolioPage(data, busy, { model.refresh() },
-                    { editor = TradeDraft() }, { details = it }, { page = Page.PAYMENTS })
+                    { editor = TradeDraft() }, { details = it }, { page = Page.PAYMENTS }, scopePicker)
                 Page.TRADES -> TradesPage(data, { editor = TradeDraft() }, { trade ->
                     editor = TradeDraft(data.bondsByIsin[trade.isin], trade)
-                })
-                Page.PAYMENTS -> PaymentsPage(data)
+                }, scopePicker)
+                Page.PAYMENTS -> PaymentsPage(data, scopePicker)
                 Page.VERSION -> UpdatePage(updates)
-                Page.BACKUP -> BackupPage(data, { export.launch("bond-portfolio-${marketToday()}.json") },
+                Page.BACKUP -> BackupPage(data.allPortfolio, { export.launch("bond-portfolio-${marketToday()}.json") },
                     { import.launch(arrayOf("application/json", "text/plain", "application/octet-stream")) },
                     {
                         model.exportForSharing { file ->
@@ -125,15 +132,23 @@ private fun BondApp(model: PortfolioViewModel, updates: UpdateViewModel) {
             }
         }
     }
-    editor?.let { draft -> TradeEditor(model, draft, data.portfolio.bonds, onClose = { editor = null }) }
+    editor?.let { draft ->
+        TradeEditor(model, draft, data.allPortfolio.bonds, data.allPortfolio.accounts,
+            data.selectedAccount?.id ?: DEFAULT_PORTFOLIO_ID, onClose = { editor = null })
+    }
+    if (namingPortfolio) {
+        PortfolioNameDialog(data.accountsById[renameId], { namingPortfolio = false }) { name, finished ->
+            model.savePortfolio(renameId, name, finished)
+        }
+    }
     preview?.let { snapshot ->
         AlertDialog(
             onDismissRequest = model::dismissPreview,
-            title = { Text("Восстановить портфель?") },
+            title = { Text("Восстановить резервную копию?") },
             text = {
-                Text("Выпуски — ${snapshot.bonds.size}\nСделки — ${snapshot.trades.size}\n" +
+                Text("Портфели — ${snapshot.accounts.size}\nВыпуски — ${snapshot.bonds.size}\nСделки — ${snapshot.trades.size}\n" +
                     "События календаря — ${snapshot.payments.count { it.isScheduled }}\n\n" +
-                    "Записи будут добавлены к текущему портфелю. При расхождениях импорт остановится.")
+                    "Копия добавит новые портфели и сделки. Уже сохранённые сделки останутся в своих портфелях.")
             },
             confirmButton = {
                 TextButton(onClick = { model.import(); returnToPortfolio() }) { Text("Восстановить") }

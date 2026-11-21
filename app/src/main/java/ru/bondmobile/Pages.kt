@@ -59,7 +59,7 @@ internal fun PageList(content: LazyListScope.() -> Unit) {
 
 @Composable
 fun PortfolioPage(data: Dashboard, busy: Boolean, refresh: () -> Unit, add: () -> Unit,
-                  openBond: (String) -> Unit, openPayments: () -> Unit) {
+                  openBond: (String) -> Unit, openPayments: () -> Unit, scopePicker: @Composable () -> Unit) {
     val total = data.overview
     val now = total.points.lastOrNull()
     val holdings = total.holdings
@@ -71,6 +71,7 @@ fun PortfolioPage(data: Dashboard, busy: Boolean, refresh: () -> Unit, add: () -
             PageHeader("Портфель", "Облигации Московской биржи", busy,
                 if (data.portfolio.trades.isNotEmpty()) refresh else null)
         }
+        item { scopePicker() }
         item {
             Column(Modifier.fillMaxWidth().background(Forest, RoundedCornerShape(25.dp)).padding(20.dp),
                 verticalArrangement = Arrangement.spacedBy(10.dp)) {
@@ -216,9 +217,10 @@ private fun HistoryChart(points: List<PortfolioPoint>) {
 }
 
 @Composable
-fun TradesPage(data: Dashboard, add: () -> Unit, edit: (Trade) -> Unit) {
+fun TradesPage(data: Dashboard, add: () -> Unit, edit: (Trade) -> Unit, scopePicker: @Composable () -> Unit) {
     PageList {
         item { PageHeader("Сделки", "История покупок и продаж") }
+        item { scopePicker() }
         item { Button(onClick = add) { Glyph(Symbol.PLUS); Text("Добавить сделку") } }
         if (data.portfolio.trades.isEmpty()) item {
             EmptyCard(Symbol.LIST, "Сделок пока нет", "Каждая покупка и продажа появится в журнале.")
@@ -238,6 +240,9 @@ private fun TradeRow(data: Dashboard, trade: Trade, edit: () -> Unit) {
                 Text(data.bondsByIsin[trade.isin]?.name ?: trade.isin, style = MaterialTheme.typography.titleMedium,
                     maxLines = 2, overflow = TextOverflow.Ellipsis)
                 Text("$title · ${trade.quantity} шт. · ${dateLabel(trade.date, true)}", color = Muted)
+                if (data.selectedAccount == null && data.accountsById.size > 1) {
+                    data.accountsById[trade.portfolioId]?.let { Text(it.name, color = Muted, style = MaterialTheme.typography.bodySmall) }
+                }
             }
             Text(rubles(data.math.tradeValue(trade)), fontWeight = FontWeight.SemiBold)
             Glyph(Symbol.NEXT, color = Forest)
@@ -251,7 +256,7 @@ private fun TradeRow(data: Dashboard, trade: Trade, edit: () -> Unit) {
 private enum class PayoutTab(val label: String) { EXPECTED("Ожидаются"), RECEIVED("Получены") }
 
 @Composable
-fun PaymentsPage(data: Dashboard) {
+fun PaymentsPage(data: Dashboard, scopePicker: @Composable () -> Unit) {
     var tab by rememberSaveable { mutableStateOf(PayoutTab.EXPECTED) }
     val today = data.today.toString()
     val received = tab == PayoutTab.RECEIVED
@@ -262,6 +267,7 @@ fun PaymentsPage(data: Dashboard) {
     }
     PageList {
         item { PageHeader("Выплаты", "Купоны, амортизация и погашение") }
+        item { scopePicker() }
         item {
             Row(horizontalArrangement = Arrangement.spacedBy(5.dp)) {
                 PayoutTab.entries.forEach { option -> FilterChip(tab == option, { tab = option }, { Text(option.label, maxLines = 1) }) }
@@ -343,7 +349,7 @@ fun BondDetails(data: Dashboard, bond: Bond, busy: Boolean, back: () -> Unit, re
 }
 
 @Composable
-fun BackupPage(data: Dashboard, save: () -> Unit, open: () -> Unit, share: () -> Unit) {
+fun BackupPage(data: Portfolio, save: () -> Unit, open: () -> Unit, share: () -> Unit) {
     PageList {
         item { PageHeader("Резервная копия", "Перенос портфеля между устройствами") }
         item {
@@ -358,9 +364,10 @@ fun BackupPage(data: Dashboard, save: () -> Unit, open: () -> Unit, share: () ->
         item {
             Sheet {
                 Text("В копию входят", style = MaterialTheme.typography.titleLarge)
-                InfoRow("Сделки", data.portfolio.trades.size.toString())
-                InfoRow("События календаря", data.portfolio.payments.count { it.isScheduled }.toString())
-                InfoRow("Сохранённые котировки", data.portfolio.quotes.size.toString())
+                InfoRow("Портфели", data.accounts.size.toString())
+                InfoRow("Сделки", data.trades.size.toString())
+                InfoRow("События календаря", data.payments.count { it.isScheduled }.toString())
+                InfoRow("Сохранённые котировки", data.quotes.size.toString())
             }
         }
     }

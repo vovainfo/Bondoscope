@@ -9,12 +9,13 @@ import java.time.LocalDate
 
 object Backup {
     private const val FILE_TYPE = "ru.bondmobile.portfolio"
-    private const val VERSION = 1
+    private const val VERSION = 2
     private const val MAX_BYTES = 32 * 1024 * 1024
 
     fun write(portfolio: Portfolio, output: OutputStream) {
         val json = obj(
             "format" to FILE_TYPE, "version" to VERSION,
+            "portfolios" to array(portfolio.accounts) { obj("id" to it.id, "name" to it.name) },
             "bonds" to array(portfolio.bonds) {
                 obj("isin" to it.isin, "secid" to it.secid, "name" to it.name, "board" to it.board,
                     "maturity" to it.maturity, "currency" to it.currency, "nominal" to it.nominal,
@@ -24,7 +25,7 @@ object Backup {
             "trades" to array(portfolio.trades) {
                 obj("id" to it.id, "isin" to it.isin, "side" to it.side.name, "quantity" to it.quantity,
                     "date" to it.date, "settlement" to it.settlement, "unit" to it.unit.name, "price" to it.price,
-                    "nominal" to it.nominal, "accrued" to it.accrued, "fee" to it.fee)
+                    "nominal" to it.nominal, "accrued" to it.accrued, "fee" to it.fee, "portfolioId" to it.portfolioId)
             },
             "payments" to array(portfolio.payments) {
                 obj("id" to it.id, "isin" to it.isin, "kind" to it.kind.name, "date" to it.date,
@@ -52,7 +53,13 @@ object Backup {
         }
         val root = JSONObject(bytes.toString("UTF-8").removePrefix("\uFEFF"))
         require(root.getString("format") == FILE_TYPE) { "Выберите резервную копию приложения «Бондоскоп»" }
-        require(root.getInt("version") == VERSION) { "Эта версия формата резервной копии не поддерживается" }
+        val version = root.getInt("version")
+        require(version in 1..VERSION) { "Эта версия формата резервной копии не поддерживается" }
+        val accounts = if (version == 1) listOf(defaultPortfolio) else root.list("portfolios", 50_000) {
+            NamedPortfolio(text("id", 160), text("name", MAX_PORTFOLIO_NAME_LENGTH).trim())
+        }
+        val accountIds = accounts.map { it.id }.toSet()
+        require(accountIds.size == accounts.size && DEFAULT_PORTFOLIO_ID in accountIds) { "В копии повреждён список портфелей" }
         val maxTradeDate = today.toString()
         val bonds = root.list("bonds", 5_000) {
             Bond(isin(), text("secid", 40), text("name", 300), optional("board", 25), day("maturity"),
@@ -65,9 +72,11 @@ object Backup {
             val settlement = day("settlement")
             require(date <= maxTradeDate && (settlement == null || settlement in date..maxTradeDate))
             val quantity = getInt("quantity").also { require(it in 1..MAX_QUANTITY) }
+            val portfolioId = if (version == 1) DEFAULT_PORTFOLIO_ID else text("portfolioId", 160)
+            require(portfolioId in accountIds) { "В копии есть сделка без портфеля" }
             Trade(text("id", 160), isin(), TradeSide.valueOf(text("side", 10)), quantity, date, settlement,
                 PriceUnit.valueOf(text("unit", 24)), number("price", positive = true) ?: error("Пропущена цена сделки"),
-                number("nominal", positive = true), number("accrued"), number("fee") ?: error("Пропущена комиссия"))
+                number("nominal", positive = true), number("accrued"), number("fee") ?: error("Пропущена комиссия"), portfolioId)
         }
         val payments = root.list("payments", 80_000) {
             val received = day("receivedDate")
@@ -92,7 +101,7 @@ object Backup {
             "В резервной копии не хватает карточек выпусков"
         }
         require(validQuantityHistory(trades)) { "В копии есть отрицательный или недопустимый остаток" }
-        return Portfolio(bonds, trades, payments, quotes)
+        return Portfolio(bonds, trades, payments, quotes, accounts)
     }
 
     private fun obj(vararg entries: Pair<String, Any?>) = JSONObject().apply {

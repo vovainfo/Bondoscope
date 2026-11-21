@@ -41,6 +41,7 @@ data class MonthlyReceipt(
 
 class PortfolioMath(private val portfolio: Portfolio) {
     private val trades = portfolio.trades.groupBy { it.isin }
+        .mapValues { (_, rows) -> rows.groupBy { it.portfolioId }.values }
     private val quotes = portfolio.quotes.groupBy { it.isin }.mapValues { (_, rows) -> rows.sortedBy { it.date } }
     private val bonds = portfolio.bonds.associateBy { it.isin }
     private val payments = portfolio.payments.filter {
@@ -50,7 +51,8 @@ class PortfolioMath(private val portfolio: Portfolio) {
     private val candidates by lazy {
         payments.values.flatten().filter { payment ->
             val cutoff = payment.recordDate ?: payment.date
-            trades[payment.isin].orEmpty().any { (it.settlement ?: it.date) <= cutoff } && estimate(payment).units != 0L
+            trades[payment.isin].orEmpty().any { rows -> rows.any { (it.settlement ?: it.date) <= cutoff } } &&
+                estimate(payment).units != 0L
         }
     }
 
@@ -65,9 +67,12 @@ class PortfolioMath(private val portfolio: Portfolio) {
         if (!payment.isScheduled || closures[payment.isin]?.let { it < cutoff } == true) {
             return PaymentEstimate(0, BigDecimal.ZERO)
         }
-        val settled = trades[payment.isin].orEmpty().filter { (it.settlement ?: it.date) <= cutoff }
-        val quantity = settled.sumOf { if (it.side == TradeSide.BUY) it.quantity.toLong() else -it.quantity.toLong() }
-        if (quantity < 0) return PaymentEstimate(null, null)
+        val quantities = trades[payment.isin].orEmpty().map { rows ->
+            rows.filter { (it.settlement ?: it.date) <= cutoff }
+                .sumOf { if (it.side == TradeSide.BUY) it.quantity.toLong() else -it.quantity.toLong() }
+        }
+        if (quantities.any { it < 0 }) return PaymentEstimate(null, null)
+        val quantity = quantities.sum()
         val estimate = payment.amountPerBond?.toBigDecimal()?.multiply(quantity.toBigDecimal())
         return PaymentEstimate(quantity, estimate)
     }
