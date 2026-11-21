@@ -99,6 +99,8 @@ class PortfolioRepository(private val database: BondDatabase, private val moex: 
         BondSearch(merged, remote.isFailure)
     }
 
+    suspend fun placementDate(bond: Bond): LocalDate? = withContext(Dispatchers.IO) { moex.placementDate(bond) }
+
     suspend fun saveTrade(bond: Bond, trade: Trade) = database.withTransaction {
         require(bond.currency == null || bond.currency.isRubles()) { "Первая версия поддерживает рублёвые облигации" }
         if (trade.side == TradeSide.SELL) {

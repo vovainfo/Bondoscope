@@ -54,6 +54,32 @@ class Moex {
         )
     }
 
+    suspend fun placementDate(bond: Bond): LocalDate? {
+        suspend fun placementDetails(secid: String) = request(
+            "/securities/${segment(secid)}.json", "iss.only" to "description,boards",
+            "description.columns" to "name,value", "boards.columns" to "engine,title,history_from,listed_from"
+        )
+
+        val raw = placementDetails(bond.secid)
+        if (bond.secid != bond.isin || table(raw, "description").isNotEmpty()) {
+            return decodePlacementDate(raw, bond.isin)
+        }
+
+        val secid = search(bond.isin).firstOrNull { it.isin == bond.isin && it.secid != bond.secid }?.secid
+            ?: return null
+        return decodePlacementDate(placementDetails(secid), bond.isin)
+    }
+
+    internal fun decodePlacementDate(raw: Any, isin: String): LocalDate? {
+        val issue = table(raw, "description").firstOrNull { it.str("name").equals("ISIN", ignoreCase = true) }
+        if (issue?.str("value") != isin) return null
+
+        return table(raw, "boards").asSequence()
+            .filter { it.str("engine") == "stock" && it.str("title")?.startsWith("Размещение", ignoreCase = true) == true }
+            .mapNotNull { it.str("history_from").asDate() ?: it.str("listed_from").asDate() }
+            .minOrNull()?.let(LocalDate::parse)
+    }
+
     suspend fun current(bond: Bond): Pair<Bond, Quote?> {
         val board = bond.board ?: return bond to null
         val raw = request(

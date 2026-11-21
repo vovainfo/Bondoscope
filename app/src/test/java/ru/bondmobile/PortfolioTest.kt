@@ -105,6 +105,24 @@ class PortfolioTest {
     }
 
     @Test
+    fun usesEarliestPlacementSessionInsteadOfTradingOrBuybackDates() {
+        val raw = JSONObject("""{
+          "description":{"columns":["name","value"],"data":[["ISIN","RU000A1074G2"],["ISSUEDATE","2023-10-25"]]},
+          "boards":{"columns":["engine","title","history_from","listed_from"],"data":[
+            ["stock","Т+: Облигации","2023-10-25","2023-10-25"],
+            ["stock","Выкуп - адрес.","2023-10-30","2023-10-30"],
+            ["stock","Размещение - адрес.","2024-06-26","2024-06-26"],
+            ["stock","Размещение: Аукцион - безадрес.","2023-11-01","2023-11-01"]
+          ]}
+        }""")
+        val moex = Moex()
+        assertEquals(day("2023-11-01"), moex.decodePlacementDate(raw, "RU000A1074G2"))
+        assertNull(moex.decodePlacementDate(raw, isin))
+        raw.remove("boards")
+        assertNull(moex.decodePlacementDate(raw, "RU000A1074G2"))
+    }
+
+    @Test
     fun preservesLegacyReceiptDataInBackupsAndRejectsMissingIssue() {
         val trade = Trade("buy", isin, TradeSide.BUY, 2, "2025-05-02", null, PriceUnit.RUB_WITH_ACCRUED,
             "1000.63", null, null, "0")

@@ -20,11 +20,13 @@ import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalFocusManager
@@ -32,6 +34,7 @@ import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import kotlinx.coroutines.CancellationException
 import java.time.LocalDate
 import java.time.ZoneId
 import java.time.temporal.ChronoUnit
@@ -61,8 +64,41 @@ fun TradeEditor(model: PortfolioViewModel, draft: TradeDraft, local: List<Bond>,
     var error by remember { mutableStateOf<String?>(null) }
     var saving by remember { mutableStateOf(false) }
     var delete by remember { mutableStateOf(false) }
+    var iboRequest by remember { mutableStateOf<Bond?>(null) }
+    var iboMessage by remember { mutableStateOf<String?>(null) }
     val id = rememberSaveable { existing?.id ?: UUID.randomUUID().toString() }
     val close = { if (!saving) { model.clearSearch(); onClose() } }
+
+    fun changeTradeDate(value: String) {
+        day = value
+        if (settlement?.let { it < value } == true) settlement = null
+    }
+
+    fun resetIbo() {
+        iboRequest = null
+        iboMessage = null
+    }
+
+    LaunchedEffect(iboRequest) {
+        val bond = iboRequest ?: return@LaunchedEffect
+        val placement = try {
+            model.placementDate(bond)
+        } catch (error: CancellationException) {
+            throw error
+        } catch (_: Exception) {
+            null
+        }
+        if (iboRequest != bond) return@LaunchedEffect
+
+        when {
+            placement == null || placement < earliestDate ->
+                iboMessage = "Дата размещения недоступна. Укажите дату сделки вручную."
+            placement > today ->
+                iboMessage = "Размещение запланировано на ${dateLabel(placement.toString())}. Укажите дату состоявшейся сделки."
+            else -> changeTradeDate(placement.toString())
+        }
+        iboRequest = null
+    }
 
     AlertDialog(
         onDismissRequest = close,
@@ -71,7 +107,7 @@ fun TradeEditor(model: PortfolioViewModel, draft: TradeDraft, local: List<Bond>,
             EditorFields {
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     FilterChip(side == TradeSide.BUY, { side = TradeSide.BUY }, { Text("Покупка") })
-                    FilterChip(side == TradeSide.SELL, { side = TradeSide.SELL }, { Text("Продажа") })
+                    FilterChip(side == TradeSide.SELL, { side = TradeSide.SELL; resetIbo() }, { Text("Продажа") })
                 }
                 val bond = selected
                 if (bond == null) {
@@ -103,13 +139,30 @@ fun TradeEditor(model: PortfolioViewModel, draft: TradeDraft, local: List<Bond>,
                     }
                 } else {
                     InfoRow("Выпуск", bond.name)
-                    if (existing == null && draft.bond == null) TextButton(onClick = { selected = null }) { Text("Другой выпуск") }
+                    if (existing == null && draft.bond == null) TextButton(onClick = {
+                        resetIbo()
+                        selected = null
+                    }) { Text("Другой выпуск") }
                 }
                 Field(quantity, { quantity = it }, "Количество, шт.", KeyboardType.Number)
-                DateField("Дата сделки", day, earliestDate, today, { value ->
-                    day = value
-                    if (settlement != null && settlement!! < day) settlement = null
-                })
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.Bottom) {
+                    DateField("Дата сделки", day, earliestDate, today, { value ->
+                        resetIbo()
+                        changeTradeDate(value)
+                    })
+                    if (existing == null && side == TradeSide.BUY) {
+                        OutlinedButton(enabled = bond != null && !saving && iboRequest == null, onClick = {
+                            focus.clearFocus()
+                            error = null
+                            iboMessage = null
+                            unit = PriceUnit.PERCENT
+                            price = "100"
+                            iboRequest = bond
+                        }) { Text("IBO") }
+                    }
+                }
+                if (iboRequest != null) LinearProgressIndicator(Modifier.fillMaxWidth())
+                iboMessage?.let { Text(it, color = Muted, style = MaterialTheme.typography.bodySmall) }
                 Text("Цена за одну облигацию", color = Muted)
                 Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                     FilterChip(unit == PriceUnit.PERCENT, { unit = PriceUnit.PERCENT }, { Text("% номинала") })
@@ -138,7 +191,7 @@ fun TradeEditor(model: PortfolioViewModel, draft: TradeDraft, local: List<Bond>,
             }
         },
         confirmButton = {
-            TextButton(enabled = !saving, onClick = {
+            TextButton(enabled = !saving && iboRequest == null, onClick = {
                 val bond = selected
                 val units = quantity.trim().toIntOrNull()
                 val enteredPrice = price.decimalOrNull()

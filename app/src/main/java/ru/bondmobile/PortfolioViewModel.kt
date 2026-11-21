@@ -103,6 +103,8 @@ class PortfolioViewModel(app: Application) : AndroidViewModel(app) {
         _searchState.value = SearchState.Idle
     }
 
+    suspend fun placementDate(bond: Bond): LocalDate? = repository.placementDate(bond)
+
     fun saveTrade(bond: Bond, trade: Trade, finished: (String?) -> Unit) = action(finished) {
         repository.saveTrade(bond, trade)
         refresh(bond.isin, quiet = true)
