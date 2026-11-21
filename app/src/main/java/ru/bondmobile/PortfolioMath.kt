@@ -34,8 +34,13 @@ data class PortfolioPoint(
     val date: LocalDate,
     val value: BigDecimal?,
     val result: BigDecimal?,
-    val usesEstimatedValuation: Boolean
-)
+    val usesEstimatedValuation: Boolean,
+    val resultUsesEstimatedValuation: Boolean,
+    val issuesWithResult: Int,
+    val issuesTracked: Int
+) {
+    val resultIsPartial: Boolean get() = result != null && issuesWithResult < issuesTracked
+}
 
 data class Overview(
     val holdings: List<Holding>,
@@ -104,15 +109,17 @@ class PortfolioMath(private val portfolio: Portfolio) {
 
     fun overview(today: LocalDate = marketToday()): Overview {
         val date = today.toString()
-        val invested = trades.keys
         val dailyTrades = portfolio.trades.groupBy { it.date }
         val costFlows = portfolio.trades.associate { it.id to tradeValue(it) }
         val received = receivedBy(today)
         val dailyReceived = received.groupBy { it.first.date }
         val totals = summarizeReceipts(received)
         val balance = mutableMapOf<String, Long>()
-        var totalFlow = BigDecimal.ZERO
-        var flowsKnown = true
+        val flows = mutableMapOf<String, BigDecimal?>()
+        fun addFlow(isin: String, amount: BigDecimal?) {
+            val previous = flows.getOrDefault(isin, BigDecimal.ZERO)
+            flows[isin] = if (previous != null && amount != null) previous + amount else null
+        }
         val series = mutableListOf<PortfolioPoint>()
         val first = portfolio.trades.minOfOrNull { LocalDate.parse(it.date) } ?: today
         var day = minOf(first, today)
@@ -122,22 +129,41 @@ class PortfolioMath(private val portfolio: Portfolio) {
             dailyTrades[key].orEmpty().forEach { trade ->
                 val delta = if (trade.side == TradeSide.BUY) trade.quantity.toLong() else -trade.quantity.toLong()
                 balance[trade.isin] = balance.getOrDefault(trade.isin, 0) + delta
-                val flow = costFlows[trade.id]
-                if (flow == null) flowsKnown = false else totalFlow += flow
+                addFlow(trade.isin, costFlows[trade.id])
             }
-            dailyReceived[key].orEmpty().forEach { (_, amount) ->
-                if (amount == null) flowsKnown = false else totalFlow += amount
+            dailyReceived[key].orEmpty().forEach { (payment, amount) ->
+                addFlow(payment.isin, amount)
             }
-            val active = invested.mapNotNull { isin ->
+
+            val active = mutableListOf<Holding>()
+            var value = BigDecimal.ZERO
+            var result = BigDecimal.ZERO
+            var allHoldingsValued = true
+            var usesEstimatedValuation = false
+            var resultUsesEstimatedValuation = false
+            var issuesWithResult = 0
+            for ((isin, flow) in flows) {
                 val count = balance.getOrDefault(isin, 0)
-                if (count <= 0 || closures.getOrDefault(isin, "9999-12-31") <= key) null
-                else holding(isin, count, day)
+                val closed = closures[isin]?.let { it <= key } == true
+                val current = if (count > 0 && !closed) holding(isin, count, day) else null
+                current?.let(active::add)
+                val holdingValue = if (current == null) BigDecimal.ZERO else current.value
+                if (holdingValue == null) {
+                    allHoldingsValued = false
+                    continue
+                }
+                val estimated = current?.estimatedAccrued != null
+                value += holdingValue
+                usesEstimatedValuation = usesEstimatedValuation || estimated
+                if (flow != null) {
+                    result += holdingValue + flow
+                    issuesWithResult++
+                    resultUsesEstimatedValuation = resultUsesEstimatedValuation || estimated
+                }
             }
-            val completeValue = active.takeIf { items -> items.all { it.value != null } }
-                ?.fold(BigDecimal.ZERO) { sum, item -> sum + item.value!! }
             if (portfolio.trades.isNotEmpty()) {
-                series += PortfolioPoint(day, completeValue, completeValue?.takeIf { flowsKnown }?.plus(totalFlow),
-                    completeValue != null && active.any { it.estimatedAccrued != null })
+                series += PortfolioPoint(day, value.takeIf { allHoldingsValued }, result.takeIf { issuesWithResult > 0 },
+                    allHoldingsValued && usesEstimatedValuation, resultUsesEstimatedValuation, issuesWithResult, flows.size)
             }
             if (day == today) holdings = active.sortedBy { it.bond.name }
             day = day.plusDays(1)

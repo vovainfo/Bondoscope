@@ -255,6 +255,8 @@ class PortfolioTest {
         assertTrue(overview.valueIsPartial)
         assertMoney("2000", overview.partialValue)
         assertNull(overview.points.last().value)
+        assertMoney("0", overview.points.last().result)
+        assertTrue(overview.points.last().resultIsPartial)
         assertMoney("4000", overview.points[overview.points.lastIndex - 1].value)
         val issue = overview.holdings.single { it.bond.isin == other.isin }.issue
         assertEquals(ValuationIssue.CouponAccrualUnknown("2026-11-21"), issue)
@@ -272,6 +274,48 @@ class PortfolioTest {
             issueFor(saved, instrument = bond.copy(nominal = "900", nominalDate = "2026-11-21")))
         assertEquals(ValuationIssue.Maturity, issueFor(saved, instrument = bond.copy(maturity = "2026-11-21")))
         assertEquals(ValuationIssue.UnsupportedCurrency, issueFor(saved, instrument = bond.copy(currency = "USD")))
+    }
+
+    @Test
+    fun showsPartialResultFromIssuesWithKnownValuationsAndCashFlows() {
+        val noAccrued = bond.copy(isin = "RU000A10C5Z7")
+        val unknownCost = bond.copy(isin = "RU000A10GDW3")
+        val redeemed = bond.copy(isin = "RU000A10DZK8")
+        val secondAccount = NamedPortfolio("second", "Второй")
+        val buy = Trade("buy", isin, TradeSide.BUY, 2, "2026-11-02", null, PriceUnit.RUB_WITH_ACCRUED,
+            "950", null, null, "0")
+        val data = Portfolio(
+            listOf(bond, noAccrued, unknownCost, redeemed),
+            listOf(buy, buy.copy(id = "no-accrued", isin = noAccrued.isin, portfolioId = secondAccount.id),
+                buy.copy(id = "unknown-cost", isin = unknownCost.isin, quantity = 1, unit = PriceUnit.PERCENT,
+                    price = "100", portfolioId = secondAccount.id),
+                buy.copy(id = "redeemed", isin = redeemed.isin, quantity = 1, price = "900")),
+            listOf(Payment("coupon", isin, PaymentKind.COUPON, "2026-11-20", null, "10"),
+                Payment("unpriced-coupon", noAccrued.isin, PaymentKind.COUPON, "2026-11-20", null, "30"),
+                Payment("redemption", redeemed.isin, PaymentKind.REDEMPTION, "2026-11-20", null, "1000")),
+            listOf(Quote(isin, "2026-11-20", "100", "1000", "0"),
+                Quote(noAccrued.isin, "2026-11-20", "1.79", "1000", null),
+                Quote(unknownCost.isin, "2026-11-20", "100", "1000", "0")),
+            listOf(defaultPortfolio, secondAccount)
+        )
+        val today = day("2026-11-21")
+        val total = PortfolioMath(data).overview(today)
+        val point = total.points.last()
+        assertNull(point.value)
+        assertMoney("3000", total.partialValue)
+        assertMoney("80", total.receivedCoupons)
+        assertMoney("1000", total.receivedPrincipal)
+        assertMoney("220", point.result)
+        assertEquals(2, point.issuesWithResult)
+        assertEquals(4, point.issuesTracked)
+        assertTrue(point.resultIsPartial)
+
+        val first = PortfolioMath(data.scoped(DEFAULT_PORTFOLIO_ID)).overview(today).points.last()
+        assertMoney("220", first.result)
+        assertFalse(first.resultIsPartial)
+        val second = PortfolioMath(data.scoped(secondAccount.id)).overview(today).points.last()
+        assertNull(second.result)
+        assertEquals(0, second.issuesWithResult)
     }
 
     @Test

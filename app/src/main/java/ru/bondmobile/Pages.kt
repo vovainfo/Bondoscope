@@ -98,6 +98,10 @@ fun PortfolioPage(data: Dashboard, busy: Boolean, refresh: () -> Unit, add: () -
                     Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(3.dp)) {
                         Text("Финансовый результат", color = Mint, style = MaterialTheme.typography.bodySmall)
                         Text(rubles(now?.result), color = Color.White, style = MaterialTheme.typography.titleMedium)
+                        if (now?.resultIsPartial == true) {
+                            Text("Частичный · ${now.issuesWithResult} из ${now.issuesTracked} выпусков",
+                                color = Mint, style = MaterialTheme.typography.bodySmall)
+                        }
                     }
                     Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(3.dp)) {
                         Text("Купоны по календарю", color = Mint, style = MaterialTheme.typography.bodySmall)
@@ -175,6 +179,9 @@ private fun HistoryChart(points: List<PortfolioPoint>) {
     var selected by remember(points, range, showResult) { mutableStateOf<Int?>(null) }
     val visible = remember(points, range) { if (range == 0) points else points.takeLast(range) }
     val nums = remember(visible, showResult) { visible.map { if (showResult) it.result else it.value } }
+    val approximate = remember(visible, showResult) {
+        visible.map { if (showResult) it.resultIsPartial || it.resultUsesEstimatedValuation else it.usesEstimatedValuation }
+    }
     val known = remember(nums) { nums.filterNotNull() }
     Sheet {
         Text("Динамика", style = MaterialTheme.typography.titleLarge)
@@ -191,7 +198,13 @@ private fun HistoryChart(points: List<PortfolioPoint>) {
             val selectedPoint = visible.getOrNull(activeIndex)
             Text("${dateLabel(selectedPoint?.date?.toString(), short = true)}  ·  ${rubles(nums.getOrNull(activeIndex))}",
                 style = MaterialTheme.typography.titleMedium)
-            if (selectedPoint?.usesEstimatedValuation == true && nums.getOrNull(activeIndex) != null) {
+            if (showResult && selectedPoint?.resultIsPartial == true) {
+                Text("Частичный результат · ${selectedPoint.issuesWithResult} из ${selectedPoint.issuesTracked} выпусков",
+                    color = Amber, style = MaterialTheme.typography.bodySmall)
+            }
+            val selectedUsesEstimate = if (showResult) selectedPoint?.resultUsesEstimatedValuation
+                else selectedPoint?.usesEstimatedValuation
+            if (selectedUsesEstimate == true && nums.getOrNull(activeIndex) != null) {
                 Text("Точка включает расчётную стоимость", color = Amber, style = MaterialTheme.typography.bodySmall)
             }
             Canvas(Modifier.fillMaxWidth().height(136.dp).semantics {
@@ -217,14 +230,14 @@ private fun HistoryChart(points: List<PortfolioPoint>) {
                     if (here != null) {
                         previous?.let { drawLine(Forest, it, here, 2.dp.toPx(), StrokeCap.Round) }
                             ?: drawCircle(Forest, 2.dp.toPx(), here)
-                        if (visible[index].usesEstimatedValuation) drawCircle(Amber, 2.dp.toPx(), here)
+                        if (approximate[index]) drawCircle(Amber, 2.dp.toPx(), here)
                     }
                     previous = here
                 }
                 nums.getOrNull(activeIndex)?.let { number ->
                     val point = xy(activeIndex, number)
                     drawLine(Divider, Offset(point.x, 0f), Offset(point.x, size.height), 1.dp.toPx())
-                    drawCircle(if (selectedPoint?.usesEstimatedValuation == true) Amber else Forest, 4.dp.toPx(), point)
+                    drawCircle(if (approximate[activeIndex]) Amber else Forest, 4.dp.toPx(), point)
                 }
             }
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
