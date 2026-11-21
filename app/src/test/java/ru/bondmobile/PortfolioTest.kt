@@ -282,6 +282,8 @@ class PortfolioTest {
                 buy.copy(id = "c", isin = gamma.isin, quantity = 8, date = "2026-11-06"),
                 buy.copy(id = "a2", date = "2026-11-02", quantity = 100, portfolioId = second.id)),
             listOf(Payment("maturity", beta.isin, PaymentKind.REDEMPTION, "2027-07-14", null, "1000")),
+            quotes = listOf(Quote(alpha.isin, "2026-11-20", "100", "1000", "0"),
+                Quote(beta.isin, "2026-11-20", "9.50", "1000", null)),
             accounts = listOf(defaultPortfolio, second)
         )
         val date = "2026-11-21"
@@ -300,6 +302,8 @@ class PortfolioTest {
         assertEquals(listOf("Альфа", "Бета", "Гамма"), sorted(PositionSort.OFFER, false))
         assertEquals(listOf("Гамма", "Бета", "Альфа"), sorted(PositionSort.QUANTITY))
         assertEquals(listOf("Альфа", "Бета", "Гамма"), sorted(PositionSort.QUANTITY, false))
+        assertEquals(listOf("Бета", "Альфа", "Гамма"), sorted(PositionSort.PRICE))
+        assertEquals(listOf("Альфа", "Бета", "Гамма"), sorted(PositionSort.PRICE, false))
     }
 
     @Test

@@ -138,7 +138,7 @@ internal fun PortfolioPage(data: Dashboard, busy: Boolean, refresh: () -> Unit, 
                     PositionSort.FIRST_TRADE -> "Первая сделка · ${dateLabel(data.math.firstTradeDate(h.bond.isin), true)}"
                     PositionSort.MATURITY -> "Погашение · ${dateLabel(data.math.maturityDate(h.bond), true)}"
                     PositionSort.OFFER -> "Ближайшая оферта · ${dateLabel(h.bond.upcomingOfferDate(today), true)}"
-                    PositionSort.NAME, PositionSort.QUANTITY -> null
+                    PositionSort.NAME, PositionSort.QUANTITY, PositionSort.PRICE -> null
                 }
                 Sheet(Modifier.clickable { openBond(h.bond.isin) }) {
                     Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -218,8 +218,7 @@ private fun HistoryChart(points: List<PortfolioPoint>) {
                 else "За этот период нет данных для оценки позиций."
             Text(message, color = Muted)
         } else {
-            val low = known.min().toDouble()
-            val high = known.max().toDouble()
+            val scale = remember(known) { MoneyScale(known.min(), known.max()) }
             val activeIndex = selected ?: nums.indexOfLast { it != null }
             val selectedPoint = visible.getOrNull(activeIndex)
             Text("${dateLabel(selectedPoint?.date?.toString(), short = true)}  ·  ${rubles(nums.getOrNull(activeIndex))}",
@@ -237,44 +236,48 @@ private fun HistoryChart(points: List<PortfolioPoint>) {
             if (selectedUsesEstimate == true && nums.getOrNull(activeIndex) != null) {
                 Text("Точка включает расчётную стоимость", color = Amber, style = MaterialTheme.typography.bodySmall)
             }
-            Canvas(Modifier.fillMaxWidth().height(136.dp).semantics {
-                contentDescription = "График ${if (showResult) "финансового результата" else "стоимости портфеля"}"
-            }.pointerInput(nums) {
-                detectTapGestures { tap ->
-                    selected = ((tap.x / size.width) * nums.lastIndex).roundToInt().coerceIn(0, nums.lastIndex)
-                }
-            }) {
-                val pad = 6.dp.toPx()
-                fun xy(index: Int, number: BigDecimal): Offset {
-                    val x = if (nums.size == 1) size.width / 2 else pad + index.toFloat() / nums.lastIndex * (size.width - 2 * pad)
-                    val ratio = if (low == high) 0.5 else (number.toDouble() - low) / (high - low)
-                    return Offset(x, pad + ((1 - ratio) * (size.height - 2 * pad)).toFloat())
-                }
-                repeat(4) { index ->
-                    val y = pad + (size.height - 2 * pad) * index / 3f
-                    drawLine(Divider, Offset(0f, y), Offset(size.width, y), 1.dp.toPx())
-                }
-                var previous: Offset? = null
-                nums.forEachIndexed { index, number ->
-                    val here = number?.let { xy(index, it) }
-                    if (here != null) {
-                        previous?.let {
-                            val partial = !showResult && (visible[index - 1].valueIsPartial || visible[index].valueIsPartial)
-                            drawLine(if (partial) Amber else Forest, it, here, 2.dp.toPx(), StrokeCap.Round)
-                        } ?: drawCircle(Forest, 2.dp.toPx(), here)
-                        if (approximate[index]) drawCircle(Amber, 2.dp.toPx(), here)
+            val plotHeight = 150.dp
+            val horizontalInset = 6.dp
+            MoneyChart(scale, plotHeight) {
+                Canvas(Modifier.fillMaxWidth().height(plotHeight).semantics {
+                    contentDescription = "График ${if (showResult) "финансового результата" else "стоимости портфеля"}"
+                }.pointerInput(nums) {
+                    detectTapGestures { tap ->
+                        val inset = horizontalInset.toPx()
+                        val width = (size.width - 2 * inset).coerceAtLeast(1f)
+                        selected = (((tap.x - inset) / width) * nums.lastIndex).roundToInt().coerceIn(0, nums.lastIndex)
                     }
-                    previous = here
+                }) {
+                    val pad = horizontalInset.toPx()
+                    val inset = chartAxisInset.toPx()
+                    fun xy(index: Int, number: BigDecimal): Offset {
+                        val x = if (nums.size == 1) size.width / 2
+                            else pad + index.toFloat() / nums.lastIndex * (size.width - 2 * pad)
+                        return Offset(x, scale.y(number, size.height, inset))
+                    }
+                    drawMoneyGrid(scale)
+                    var previous: Offset? = null
+                    nums.forEachIndexed { index, number ->
+                        val here = number?.let { xy(index, it) }
+                        if (here != null) {
+                            previous?.let {
+                                val partial = !showResult && (visible[index - 1].valueIsPartial || visible[index].valueIsPartial)
+                                drawLine(if (partial) Amber else Forest, it, here, 2.dp.toPx(), StrokeCap.Round)
+                            } ?: drawCircle(Forest, 2.dp.toPx(), here)
+                            if (approximate[index]) drawCircle(Amber, 2.dp.toPx(), here)
+                        }
+                        previous = here
+                    }
+                    nums.getOrNull(activeIndex)?.let { number ->
+                        val point = xy(activeIndex, number)
+                        drawLine(Divider, Offset(point.x, 0f), Offset(point.x, size.height), 1.dp.toPx())
+                        drawCircle(if (approximate[activeIndex]) Amber else Forest, 4.dp.toPx(), point)
+                    }
                 }
-                nums.getOrNull(activeIndex)?.let { number ->
-                    val point = xy(activeIndex, number)
-                    drawLine(Divider, Offset(point.x, 0f), Offset(point.x, size.height), 1.dp.toPx())
-                    drawCircle(if (approximate[activeIndex]) Amber else Forest, 4.dp.toPx(), point)
+                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                    Text(dateLabel(visible.firstOrNull()?.date?.toString(), short = true), color = Muted)
+                    Text(dateLabel(visible.lastOrNull()?.date?.toString(), short = true), color = Muted)
                 }
-            }
-            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-                Text(dateLabel(visible.firstOrNull()?.date?.toString(), short = true), color = Muted)
-                Text(dateLabel(visible.lastOrNull()?.date?.toString(), short = true), color = Muted)
             }
         }
         Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {

@@ -9,6 +9,7 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyRow
@@ -30,7 +31,6 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.contentDescription
@@ -53,6 +53,7 @@ private val monthTitle = DateTimeFormatter.ofPattern("LLLL yyyy", receiptLocale)
 private val monthTick = DateTimeFormatter.ofPattern("LLL", receiptLocale)
 private val principalColor = Color(0xFF527C98)
 private val plotHeight = 128.dp
+private val chartHeight = plotHeight + chartAxisInset * 2
 
 @Composable
 fun ReceivedPaymentsChart(receipts: Map<YearMonth, MonthlyReceipt>, today: LocalDate) {
@@ -75,6 +76,7 @@ fun ReceivedPaymentsChart(receipts: Map<YearMonth, MonthlyReceipt>, today: Local
         ?: months.findLast { it in receipts } ?: latest
     val chosen = receipts[selected] ?: MonthlyReceipt()
     val upper = months.maxOf { receipts[it]?.total ?: BigDecimal.ZERO }
+    val scale = remember(upper) { MoneyScale(BigDecimal.ZERO, upper) }
 
     Sheet {
         Text("История выплат", style = MaterialTheme.typography.titleLarge)
@@ -88,26 +90,23 @@ fun ReceivedPaymentsChart(receipts: Map<YearMonth, MonthlyReceipt>, today: Local
             Text(selected.displayMonth(), Modifier.weight(1f), style = MaterialTheme.typography.titleMedium)
             Text(rubles(chosen.total), color = Forest, fontWeight = FontWeight.SemiBold)
         }
-        if (upper.signum() > 0) {
-            Text(rubles(upper), color = Muted, style = MaterialTheme.typography.bodySmall,
-                modifier = Modifier.align(Alignment.End))
-        }
-        BoxWithConstraints(Modifier.fillMaxWidth()) {
-            val columnWidth = (maxWidth / 6).coerceAtLeast(48.dp)
-            Canvas(Modifier.fillMaxWidth().height(plotHeight)) {
-                for (step in 0..4) {
-                    val y = (size.height - 1.dp.toPx()) * step / 4
-                    drawLine(Divider, Offset(0f, y), Offset(size.width, y), 1.dp.toPx())
+        MoneyChart(scale, chartHeight) {
+            BoxWithConstraints(Modifier.fillMaxWidth()) {
+                val columnWidth = (maxWidth / 6).coerceAtLeast(40.dp)
+                Canvas(Modifier.fillMaxWidth().height(chartHeight)) {
+                    drawMoneyGrid(scale)
                 }
-            }
-            key(period, first, latest) {
-                val firstIndex = months.indexOf(selected).coerceAtLeast(0).coerceAtMost((months.size - 6).coerceAtLeast(0))
-                val scroll = rememberLazyListState(initialFirstVisibleItemIndex = firstIndex)
-                LazyRow(state = scroll) {
-                    items(months, key = YearMonth::toString) { month ->
-                        val amounts = receipts[month] ?: MonthlyReceipt()
-                        ReceiptColumn(month, amounts, upper, columnWidth, month == selected) {
-                            selectedKey = month.toString()
+                key(period, first, latest) {
+                    val visibleColumns = (maxWidth / columnWidth).toInt().coerceAtLeast(1)
+                    val firstIndex = months.indexOf(selected).coerceAtLeast(0)
+                        .coerceAtMost((months.size - visibleColumns).coerceAtLeast(0))
+                    val scroll = rememberLazyListState(initialFirstVisibleItemIndex = firstIndex)
+                    LazyRow(state = scroll) {
+                        items(months, key = YearMonth::toString) { month ->
+                            val amounts = receipts[month] ?: MonthlyReceipt()
+                            ReceiptColumn(month, amounts, scale.maximumTick, columnWidth, month == selected) {
+                                selectedKey = month.toString()
+                            }
                         }
                     }
                 }
@@ -135,8 +134,8 @@ private fun ReceiptColumn(month: YearMonth, amounts: MonthlyReceipt, scale: BigD
             .semantics { contentDescription = description },
         horizontalAlignment = Alignment.CenterHorizontally
     ) {
-        Box(Modifier.fillMaxWidth().height(plotHeight), contentAlignment = Alignment.BottomCenter) {
-            Column(Modifier.width(19.dp)) {
+        Box(Modifier.fillMaxWidth().height(chartHeight), contentAlignment = Alignment.BottomCenter) {
+            Column(Modifier.padding(bottom = chartAxisInset).width(19.dp)) {
                 if (principalHeight > 0.dp) Box(Modifier.fillMaxWidth().height(principalHeight).background(principalColor))
                 if (couponHeight > 0.dp) Box(Modifier.fillMaxWidth().height(couponHeight).background(Forest))
                 if (couponHeight == 0.dp && principalHeight == 0.dp) {

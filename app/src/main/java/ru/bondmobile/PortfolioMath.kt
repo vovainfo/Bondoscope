@@ -28,7 +28,8 @@ internal enum class PositionSort(val label: String) {
     FIRST_TRADE("По дате первой сделки"),
     MATURITY("По дате погашения"),
     OFFER("По дате оферты"),
-    QUANTITY("По количеству облигаций")
+    QUANTITY("По количеству облигаций"),
+    PRICE("По цене, %")
 }
 
 sealed interface ValuationIssue {
@@ -120,6 +121,10 @@ class PortfolioMath(private val portfolio: Portfolio) {
             PositionSort.MATURITY -> compareBy<Holding, String?>(dates) { maturityDate(it.bond) }
             PositionSort.OFFER -> compareBy<Holding, String?>(dates) { it.bond.upcomingOfferDate(today) }
             PositionSort.QUANTITY -> if (ascending) compareBy(Holding::quantity) else compareByDescending(Holding::quantity)
+            PositionSort.PRICE -> {
+                val prices = nullsLast(if (ascending) naturalOrder<BigDecimal>() else reverseOrder())
+                compareBy<Holding, BigDecimal?>(prices) { it.quote?.cleanPercent?.toBigDecimalOrNull() }
+            }
         }
         return holdings.sortedWith(ordering.then(byName))
     }
