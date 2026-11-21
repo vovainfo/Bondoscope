@@ -12,10 +12,12 @@ data class Holding(
     val bond: Bond,
     val quantity: Long,
     val value: BigDecimal?,
-    val quoteDate: String?,
+    val quote: Quote?,
     val issue: ValuationIssue?,
     val estimatedAccrued: BigDecimal? = null
-)
+) {
+    val quoteDate: String? get() = quote?.date
+}
 
 enum class QuoteField { PRICE, NOMINAL, ACCRUED }
 
@@ -36,10 +38,13 @@ data class PortfolioPoint(
     val value: BigDecimal?,
     val result: BigDecimal?,
     val usesEstimatedValuation: Boolean,
+    val positionsWithValue: Int,
+    val openPositions: Int,
     val resultUsesEstimatedValuation: Boolean,
     val issuesWithResult: Int,
     val issuesTracked: Int
 ) {
+    val valueIsPartial: Boolean get() = value != null && positionsWithValue < openPositions
     val resultIsPartial: Boolean get() = result != null && issuesWithResult < issuesTracked
 }
 
@@ -48,8 +53,6 @@ data class Overview(
     val points: List<PortfolioPoint>,
     val receivedCoupons: BigDecimal,
     val receivedPrincipal: BigDecimal,
-    val partialValue: BigDecimal,
-    val valueIsPartial: Boolean,
     val payoutsIncomplete: Boolean
 )
 
@@ -147,7 +150,7 @@ class PortfolioMath(private val portfolio: Portfolio) {
             val active = mutableListOf<Holding>()
             var value = BigDecimal.ZERO
             var result = BigDecimal.ZERO
-            var allHoldingsValued = true
+            var positionsWithValue = 0
             var usesEstimatedValuation = false
             var resultUsesEstimatedValuation = false
             var issuesWithResult = 0
@@ -157,13 +160,13 @@ class PortfolioMath(private val portfolio: Portfolio) {
                 val current = if (count > 0 && !closed) holding(isin, count, day) else null
                 current?.let(active::add)
                 val holdingValue = if (current == null) BigDecimal.ZERO else current.value
-                if (holdingValue == null) {
-                    allHoldingsValued = false
-                    continue
-                }
+                if (holdingValue == null) continue
                 val estimated = current?.estimatedAccrued != null
-                value += holdingValue
-                usesEstimatedValuation = usesEstimatedValuation || estimated
+                if (current != null) {
+                    value += holdingValue
+                    positionsWithValue++
+                    usesEstimatedValuation = usesEstimatedValuation || estimated
+                }
                 if (flow != null) {
                     result += holdingValue + flow
                     issuesWithResult++
@@ -171,8 +174,17 @@ class PortfolioMath(private val portfolio: Portfolio) {
                 }
             }
             if (portfolio.trades.isNotEmpty()) {
-                series += PortfolioPoint(day, value.takeIf { allHoldingsValued }, result.takeIf { issuesWithResult > 0 },
-                    allHoldingsValued && usesEstimatedValuation, resultUsesEstimatedValuation, issuesWithResult, flows.size)
+                series += PortfolioPoint(
+                    date = day,
+                    value = value.takeIf { active.isEmpty() || positionsWithValue > 0 },
+                    result = result.takeIf { issuesWithResult > 0 },
+                    usesEstimatedValuation = usesEstimatedValuation,
+                    positionsWithValue = positionsWithValue,
+                    openPositions = active.size,
+                    resultUsesEstimatedValuation = resultUsesEstimatedValuation,
+                    issuesWithResult = issuesWithResult,
+                    issuesTracked = flows.size
+                )
             }
             if (day == today) holdings = active.sortedBy { it.bond.name }
             day = day.plusDays(1)
@@ -182,8 +194,6 @@ class PortfolioMath(private val portfolio: Portfolio) {
             series,
             totals.coupons,
             totals.principal,
-            holdings.mapNotNull { it.value }.fold(BigDecimal.ZERO, BigDecimal::add),
-            holdings.any { it.value == null },
             totals.incomplete
         )
     }
@@ -222,12 +232,12 @@ class PortfolioMath(private val portfolio: Portfolio) {
 
     private fun holding(isin: String, count: Long, day: LocalDate): Holding {
         val bond = bonds[isin] ?: Bond(isin, isin, isin)
-        if (bond.currency != null && !bond.currency.isRubles()) {
-            return Holding(bond, count, null, null, ValuationIssue.UnsupportedCurrency)
-        }
         val date = day.toString()
         val quote = quoteAt(isin, date)
-        fun unavailable(issue: ValuationIssue) = Holding(bond, count, null, quote?.date, issue)
+        fun unavailable(issue: ValuationIssue) = Holding(bond, count, null, quote, issue)
+        if (bond.currency != null && !bond.currency.isRubles()) {
+            return unavailable(ValuationIssue.UnsupportedCurrency)
+        }
         val schedule = payments[isin].orEmpty()
         val matured = bond.maturity?.let { it <= date } == true || schedule.any {
             it.kind == PaymentKind.REDEMPTION && it.date <= date
@@ -267,7 +277,7 @@ class PortfolioMath(private val portfolio: Portfolio) {
         }
         val accrued = estimatedAccrued ?: requireNotNull(quotedAccrued)
         val value = (clean.multiply(nominal).movePointLeft(2) + accrued) * count.toBigDecimal()
-        return Holding(bond, count, value, quote.date, null, estimatedAccrued)
+        return Holding(bond, count, value, quote, null, estimatedAccrued)
     }
 
     private fun couponAccruedAt(schedule: List<Payment>, day: LocalDate, start: String, nominal: BigDecimal): BigDecimal? {

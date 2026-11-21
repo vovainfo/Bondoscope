@@ -71,6 +71,8 @@ class PortfolioTest {
         assertMoney("200", before.receivedPrincipal)
         val updated = math.overview(day("2025-05-07"))
         assertTrue(updated.holdings.isEmpty())
+        assertMoney("0", updated.points.last().value)
+        assertFalse(updated.points.last().valueIsPartial)
         assertMoney("2000", updated.receivedPrincipal)
         assertMoney("0", updated.points.last().result)
         assertEquals("2025-05-07", base.payments.redemptionDate())
@@ -294,7 +296,7 @@ class PortfolioTest {
     }
 
     @Test
-    fun explainsMissingValuationsWithoutChangingThePartialTotal() {
+    fun keepsPartialMarketValueInHistoryAndExplainsMissingValuations() {
         val other = bond.copy(isin = "RU000A10GDW3", secid = "RU000A10GDW3", name = "Другая облигация")
         val buy = Trade("buy", isin, TradeSide.BUY, 2, "2026-11-02", null, PriceUnit.RUB_WITH_ACCRUED,
             "1000", null, null, "0")
@@ -304,13 +306,23 @@ class PortfolioTest {
         val data = Portfolio(listOf(bond, other), listOf(buy, buy.copy(id = "other-buy", isin = other.isin)),
             listOf(coupon), quotes)
         val today = day("2026-11-21")
-        val overview = PortfolioMath(data).overview(today)
-        assertTrue(overview.valueIsPartial)
-        assertMoney("2000", overview.partialValue)
-        assertNull(overview.points.last().value)
-        assertMoney("0", overview.points.last().result)
-        assertTrue(overview.points.last().resultIsPartial)
-        assertMoney("4000", overview.points[overview.points.lastIndex - 1].value)
+        val math = PortfolioMath(data)
+        val overview = math.overview(today)
+        val point = overview.points.last()
+        assertTrue(point.valueIsPartial)
+        assertEquals(1, point.positionsWithValue)
+        assertEquals(2, point.openPositions)
+        assertMoney("2000", point.value)
+        assertMoney("0", point.result)
+        assertTrue(point.resultIsPartial)
+        val full = overview.points[overview.points.lastIndex - 1]
+        assertMoney("4000", full.value)
+        assertFalse(full.valueIsPartial)
+        val expired = math.overview(day("2026-11-28")).points.last()
+        assertNull(expired.value)
+        assertEquals(0, expired.positionsWithValue)
+        assertEquals(2, expired.openPositions)
+        assertFalse(expired.valueIsPartial)
         val issue = overview.holdings.single { it.bond.isin == other.isin }.issue
         assertEquals(ValuationIssue.CouponAccrualUnknown("2026-11-21"), issue)
 
@@ -354,8 +366,12 @@ class PortfolioTest {
         val today = day("2026-11-21")
         val total = PortfolioMath(data).overview(today)
         val point = total.points.last()
-        assertNull(point.value)
-        assertMoney("3000", total.partialValue)
+        assertMoney("3000", point.value)
+        assertTrue(point.valueIsPartial)
+        val unvalued = total.holdings.single { it.bond.isin == noAccrued.isin }
+        assertNull(unvalued.value)
+        assertEquals("1.79", unvalued.quote?.cleanPercent)
+        assertEquals("2026-11-20", unvalued.quoteDate)
         assertMoney("80", total.receivedCoupons)
         assertMoney("1000", total.receivedPrincipal)
         assertMoney("220", point.result)
@@ -384,7 +400,7 @@ class PortfolioTest {
         val data = Portfolio(listOf(poliplast), listOf(buy), listOf(paid, next), listOf(oldQuote))
         val math = PortfolioMath(data)
         val onCoupon = math.overview(day(paid.date))
-        assertFalse(onCoupon.valueIsPartial)
+        assertFalse(onCoupon.points.last().valueIsPartial)
         assertMoney("138620", onCoupon.holdings.single().value)
         assertMoney("0", onCoupon.holdings.single().estimatedAccrued)
         assertEquals(oldQuote.date, onCoupon.holdings.single().quoteDate)

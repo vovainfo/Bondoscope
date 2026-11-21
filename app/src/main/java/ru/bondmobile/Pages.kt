@@ -51,6 +51,8 @@ import androidx.core.net.toUri
 import java.math.BigDecimal
 import kotlin.math.roundToInt
 
+private fun Quote?.pricePercentLabel(): String = this?.cleanPercent?.let { "${decimalLabel(it)} %" } ?: "—"
+
 @Composable
 internal fun PageList(content: LazyListScope.() -> Unit) {
     LazyColumn(
@@ -82,10 +84,9 @@ fun PortfolioPage(data: Dashboard, busy: Boolean, refresh: () -> Unit, add: () -
             Column(Modifier.fillMaxWidth().background(Forest, RoundedCornerShape(25.dp)).padding(20.dp),
                 verticalArrangement = Arrangement.spacedBy(10.dp)) {
                 Text("Рыночная стоимость", color = Mint, style = MaterialTheme.typography.titleMedium)
-                val amount = if (total.valueIsPartial) total.partialValue.takeIf { holdings.any { h -> h.value != null } }
-                else now?.value ?: BigDecimal.ZERO
+                val amount = if (now != null) now.value else BigDecimal.ZERO
                 Text(rubles(amount), color = Color.White, fontSize = 35.sp, lineHeight = 42.sp, fontWeight = FontWeight.Bold)
-                if (total.valueIsPartial) {
+                if (unavailable.isNotEmpty()) {
                     Text("Оценка неполная · ${unavailable.size} из ${holdings.size} позиций без оценки", color = Mint)
                 }
                 if (estimatedCount > 0) {
@@ -94,7 +95,7 @@ fun PortfolioPage(data: Dashboard, busy: Boolean, refresh: () -> Unit, add: () -
                 if (defaultCount > 0) {
                     Text("Выпуски с признаками дефолта · $defaultCount", color = Mint)
                 }
-                if (total.valueIsPartial || estimatedCount > 0) {
+                if (unavailable.isNotEmpty() || estimatedCount > 0) {
                     TextButton(onClick = { showValuationDetails = true }) {
                         Text("Подробности оценки", color = Color.White)
                         Glyph(Symbol.NEXT, color = Color.White)
@@ -135,7 +136,7 @@ fun PortfolioPage(data: Dashboard, busy: Boolean, refresh: () -> Unit, add: () -
                             Text(h.bond.name, style = MaterialTheme.typography.titleMedium)
                             Text("${h.bond.secid} · ${h.quantity} шт.", color = Muted, style = MaterialTheme.typography.bodySmall)
                         }
-                        Text(rubles(h.value), fontWeight = FontWeight.SemiBold)
+                        Text(h.quote.pricePercentLabel(), fontWeight = FontWeight.SemiBold, maxLines = 1)
                         Glyph(Symbol.NEXT, color = Forest)
                     }
                     h.quoteDate?.let {
@@ -187,7 +188,10 @@ private fun HistoryChart(points: List<PortfolioPoint>) {
     val visible = remember(points, range) { if (range == 0) points else points.takeLast(range) }
     val nums = remember(visible, showResult) { visible.map { if (showResult) it.result else it.value } }
     val approximate = remember(visible, showResult) {
-        visible.map { if (showResult) it.resultIsPartial || it.resultUsesEstimatedValuation else it.usesEstimatedValuation }
+        visible.map {
+            if (showResult) it.resultIsPartial || it.resultUsesEstimatedValuation
+            else it.valueIsPartial || it.usesEstimatedValuation
+        }
     }
     val known = remember(nums) { nums.filterNotNull() }
     Sheet {
@@ -197,7 +201,9 @@ private fun HistoryChart(points: List<PortfolioPoint>) {
             FilterChip(showResult, { showResult = true }, { Text("Результат") })
         }
         if (known.isEmpty()) {
-            Text("График появится, когда будет достаточно котировок и данных о сделках.", color = Muted)
+            val message = if (showResult) "График появится, когда будет достаточно котировок и данных о сделках."
+                else "За этот период нет данных для оценки позиций."
+            Text(message, color = Muted)
         } else {
             val low = known.min().toDouble()
             val high = known.max().toDouble()
@@ -207,6 +213,10 @@ private fun HistoryChart(points: List<PortfolioPoint>) {
                 style = MaterialTheme.typography.titleMedium)
             if (showResult && selectedPoint?.resultIsPartial == true) {
                 Text("Частичный результат · ${selectedPoint.issuesWithResult} из ${selectedPoint.issuesTracked} выпусков",
+                    color = Amber, style = MaterialTheme.typography.bodySmall)
+            }
+            if (!showResult && selectedPoint?.valueIsPartial == true) {
+                Text("Частичная стоимость · ${selectedPoint.positionsWithValue} из ${selectedPoint.openPositions} позиций",
                     color = Amber, style = MaterialTheme.typography.bodySmall)
             }
             val selectedUsesEstimate = if (showResult) selectedPoint?.resultUsesEstimatedValuation
@@ -235,8 +245,10 @@ private fun HistoryChart(points: List<PortfolioPoint>) {
                 nums.forEachIndexed { index, number ->
                     val here = number?.let { xy(index, it) }
                     if (here != null) {
-                        previous?.let { drawLine(Forest, it, here, 2.dp.toPx(), StrokeCap.Round) }
-                            ?: drawCircle(Forest, 2.dp.toPx(), here)
+                        previous?.let {
+                            val partial = !showResult && (visible[index - 1].valueIsPartial || visible[index].valueIsPartial)
+                            drawLine(if (partial) Amber else Forest, it, here, 2.dp.toPx(), StrokeCap.Round)
+                        } ?: drawCircle(Forest, 2.dp.toPx(), here)
                         if (approximate[index]) drawCircle(Amber, 2.dp.toPx(), here)
                     }
                     previous = here
@@ -388,7 +400,7 @@ fun BondDetails(data: Dashboard, bond: Bond, busy: Boolean, back: () -> Unit, re
                     rubles(holding?.value))
                 holding?.issue?.let { Text(it.description(), color = Amber) }
                 holding?.estimatedAccrued?.let { InfoRow("НКД по календарю", rubles(it)) }
-                InfoRow("Цена последней котировки", recent?.cleanPercent?.let { "${decimalLabel(it)} %" } ?: "—")
+                InfoRow("Цена последней котировки", recent.pricePercentLabel())
                 InfoRow("Непогашенный номинал", rubles(bond.nominal?.toBigDecimalOrNull() ?: recent?.nominal?.toBigDecimalOrNull()))
                 InfoRow("НКД по последней котировке", rubles(recent?.accrued?.toBigDecimalOrNull()))
                 InfoRow("Дата последней котировки", dateLabel(recent?.date, true))
