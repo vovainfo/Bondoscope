@@ -16,7 +16,7 @@ import java.time.LocalDate
 import java.util.Locale
 import javax.net.ssl.HttpsURLConnection
 
-data class BondCalendar(val payments: List<Payment>, val complete: Boolean)
+data class BondCalendar(val payments: List<Payment>, val complete: Boolean, val offerDates: List<String>?)
 
 internal data class PlacementBoard(
     val secid: String,
@@ -53,13 +53,17 @@ class Moex {
         }
         val resolvedIsin = description["ISIN"]
         if (resolvedIsin != null && resolvedIsin != original.isin) throw IOException("ISIN выпуска не совпадает")
-        val status = readDefaultStatus(original, description["HASDEFAULT"], description["HASTECHNICALDEFAULT"], marketToday())
+        val today = marketToday()
+        val status = readDefaultStatus(original, description["HASDEFAULT"], description["HASTECHNICALDEFAULT"], today)
+        val nominal = description["FACEVALUE"]?.decimalOrNull()?.toPlainString()
         return original.copy(
             secid = description["SECID"] ?: original.secid,
             name = description["SHORTNAME"] ?: description["NAME"] ?: original.name,
             board = primary?.str("boardid") ?: original.board,
             maturity = description["MATDATE"].asDate(),
             currency = description["FACEUNIT"] ?: primary?.str("currencyid") ?: original.currency,
+            nominal = nominal ?: original.nominal,
+            nominalDate = if (nominal != null) today.toString() else original.nominalDate,
             updatedAt = System.currentTimeMillis(),
             defaultStatus = status.defaultStatus,
             paymentsUnverifiedThrough = status.paymentsUnverifiedThrough
@@ -135,12 +139,14 @@ class Moex {
         val market = table(raw, "marketdata").firstOrNull()
         val nominal = security?.number("FACEVALUE")
         val now = marketToday().toString()
+        val settlement = security?.str("SETTLEDATE").asDate()
+        val currentNominal = nominal?.takeIf { bond.nominalDate != now && (settlement == null || settlement <= now) }
         val currency = security?.str("FACEUNIT") ?: bond.currency
         val updated = bond.copy(
             maturity = security?.str("MATDATE").asDate() ?: bond.maturity,
             currency = currency,
-            nominal = nominal ?: bond.nominal,
-            nominalDate = if (nominal != null) now else bond.nominalDate
+            nominal = currentNominal ?: bond.nominal,
+            nominalDate = if (currentNominal != null) now else bond.nominalDate
         )
         val date = market?.str("TRADEDATE", "SYSTIME")?.take(10).asDate()
         val last = market?.number("LAST")?.takeIf { it.toBigDecimal() > BigDecimal.ZERO }
@@ -162,11 +168,15 @@ class Moex {
         }
         val couponTask = async { read("coupons") }
         val principalTask = async { read("amortizations") }
+        val offersTask = async { read("offers") }
         val couponRows = couponTask.await()
         val principalRows = principalTask.await()
         BondCalendar(decodeCalendar(bond, couponRows.orEmpty(), principalRows.orEmpty()),
-            couponRows != null && principalRows != null)
+            couponRows != null && principalRows != null, offersTask.await()?.let(::decodeOfferDates))
     }
+
+    internal fun decodeOfferDates(rows: List<JSONObject>): List<String> =
+        rows.mapNotNull { it.str("offerdate").asDate() }.distinct().sorted()
 
     internal fun decodeCalendar(bond: Bond, couponRows: List<JSONObject>, principalRows: List<JSONObject>): List<Payment> {
         val coupons = couponRows.mapNotNull { row ->

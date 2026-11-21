@@ -62,11 +62,13 @@ internal fun PageList(content: LazyListScope.() -> Unit) {
 }
 
 @Composable
-fun PortfolioPage(data: Dashboard, busy: Boolean, refresh: () -> Unit, add: () -> Unit,
-                  openBond: (String) -> Unit, openPayments: () -> Unit, scopePicker: @Composable () -> Unit) {
+internal fun PortfolioPage(data: Dashboard, busy: Boolean, refresh: () -> Unit, add: () -> Unit,
+                  openBond: (String) -> Unit, openPayments: () -> Unit, scopePicker: @Composable () -> Unit,
+                  sort: PositionSort, ascending: Boolean, selectSort: (PositionSort) -> Unit, reverseSort: () -> Unit) {
     val total = data.overview
     val now = total.points.lastOrNull()
-    val holdings = total.holdings
+    val today = data.today.toString()
+    val holdings = remember(data, sort, ascending) { data.math.sortedHoldings(total.holdings, sort, ascending, today) }
     val unavailable = holdings.filter { it.issue != null }
     val estimatedCount = holdings.count { it.estimatedAccrued != null }
     val defaultCount = holdings.count { it.bond.defaultStatus != null }
@@ -129,7 +131,15 @@ fun PortfolioPage(data: Dashboard, busy: Boolean, refresh: () -> Unit, add: () -
                 }
             }
             if (holdings.isEmpty()) item { Sheet { Text("Открытых позиций нет", color = Muted) } }
+            else item { PositionSortPicker(sort, ascending, selectSort, reverseSort) }
             items(holdings, key = { it.bond.isin }) { h ->
+                val nominal = remember(data, h.bond) { data.math.remainingNominal(h.bond, today) }
+                val sortDate = when (sort) {
+                    PositionSort.FIRST_TRADE -> "Первая сделка · ${dateLabel(data.math.firstTradeDate(h.bond.isin), true)}"
+                    PositionSort.MATURITY -> "Погашение · ${dateLabel(data.math.maturityDate(h.bond), true)}"
+                    PositionSort.OFFER -> "Ближайшая оферта · ${dateLabel(h.bond.upcomingOfferDate(today), true)}"
+                    PositionSort.NAME, PositionSort.QUANTITY -> null
+                }
                 Sheet(Modifier.clickable { openBond(h.bond.isin) }) {
                     Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                         Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(4.dp)) {
@@ -139,6 +149,9 @@ fun PortfolioPage(data: Dashboard, busy: Boolean, refresh: () -> Unit, add: () -
                         Text(h.quote.pricePercentLabel(), fontWeight = FontWeight.SemiBold, maxLines = 1)
                         Glyph(Symbol.NEXT, color = Forest)
                     }
+                    Text("Номинал · ${nominal?.let { "${rubles(it)} / шт." } ?: "—"}",
+                        color = Muted, style = MaterialTheme.typography.bodySmall)
+                    sortDate?.let { Text(it, color = Muted, style = MaterialTheme.typography.bodySmall) }
                     h.quoteDate?.let {
                         val label = if (h.estimatedAccrued != null) "Расчётная оценка по котировке от" else "Котировка от"
                         Text("$label ${dateLabel(it, short = true)}",
@@ -386,6 +399,8 @@ private fun PaymentRow(data: Dashboard, payment: Payment) {
 fun BondDetails(data: Dashboard, bond: Bond, busy: Boolean, back: () -> Unit, refresh: () -> Unit,
                 add: () -> Unit, edit: (Trade) -> Unit) {
     val context = LocalContext.current
+    val today = data.today.toString()
+    val nominal = remember(data, bond) { data.math.remainingNominal(bond, today) }
     val holding = data.overview.holdings.find { it.bond.isin == bond.isin }
     val recent = data.portfolio.quotes.filter { it.isin == bond.isin }.maxByOrNull { it.date }
     val trades = data.portfolio.trades.filter { it.isin == bond.isin }.sortedByDescending { it.date }
@@ -401,10 +416,11 @@ fun BondDetails(data: Dashboard, bond: Bond, busy: Boolean, back: () -> Unit, re
                 holding?.issue?.let { Text(it.description(), color = Amber) }
                 holding?.estimatedAccrued?.let { InfoRow("НКД по календарю", rubles(it)) }
                 InfoRow("Цена последней котировки", recent.pricePercentLabel())
-                InfoRow("Непогашенный номинал", rubles(bond.nominal?.toBigDecimalOrNull() ?: recent?.nominal?.toBigDecimalOrNull()))
+                InfoRow("Непогашенный номинал", rubles(nominal))
                 InfoRow("НКД по последней котировке", rubles(recent?.accrued?.toBigDecimalOrNull()))
                 InfoRow("Дата последней котировки", dateLabel(recent?.date, true))
-                InfoRow("Плановое погашение", dateLabel(bond.maturity, true))
+                InfoRow("Плановое погашение", dateLabel(data.math.maturityDate(bond), true))
+                InfoRow("Ближайшая оферта", dateLabel(bond.upcomingOfferDate(today), true))
                 InfoRow("Календарь обновлён", if (bond.calendarUpdatedAt > 0) instantLabel(bond.calendarUpdatedAt) else "Ещё не загружен")
                 TextButton(onClick = {
                     val ticker = Uri.encode(bond.secid.lowercase())

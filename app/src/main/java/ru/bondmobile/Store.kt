@@ -51,7 +51,7 @@ interface PortfolioDao {
     @Query("DELETE FROM payments WHERE id = :id") suspend fun deletePayment(id: String)
 }
 
-@Database(entities = [Bond::class, Trade::class, Payment::class, Quote::class, NamedPortfolio::class], version = 3)
+@Database(entities = [Bond::class, Trade::class, Payment::class, Quote::class, NamedPortfolio::class], version = 4)
 abstract class BondDatabase : RoomDatabase() {
     abstract fun portfolio(): PortfolioDao
 }
@@ -90,10 +90,16 @@ internal val migrateDefaultStatus = object : Migration(2, 3) {
     }
 }
 
+internal val migrateOffers = object : Migration(3, 4) {
+    override fun migrate(db: SupportSQLiteDatabase) {
+        db.execSQL("ALTER TABLE bonds ADD COLUMN offerDate TEXT")
+    }
+}
+
 class BondApplication : Application() {
     val repository by lazy {
         PortfolioRepository(Room.databaseBuilder(this, BondDatabase::class.java, "portfolio.db")
-            .addMigrations(migratePortfolios, migrateDefaultStatus)
+            .addMigrations(migratePortfolios, migrateDefaultStatus, migrateOffers)
             .addCallback(object : RoomDatabase.Callback() {
                 override fun onCreate(db: SupportSQLiteDatabase) = seedDefaultPortfolio(db)
             }).build())
@@ -259,9 +265,14 @@ class PortfolioRepository(private val database: BondDatabase, private val moex: 
         }
         val calendar = calendarTask.await().getOrNull()
         val newEvents = calendar?.payments
+        val offerDates = calendar?.offerDates
         if (calendar?.complete != true) errors += "${original.secid} · календарь выплат"
+        if (offerDates == null) errors += "${original.secid} · календарь оферт"
         database.withTransaction {
+            val date = today.toString()
             val record = latestBond.copy(
+                offerDate = if (offerDates == null) latestBond.offerDate
+                    else offerDates.firstOrNull { it >= date },
                 calendarUpdatedAt = if (calendar?.complete == true) asOf else original.calendarUpdatedAt,
                 historyStart = if (historical != null) minOf(earliest.toString(), original.historyStart ?: "9999-12-31")
                 else original.historyStart

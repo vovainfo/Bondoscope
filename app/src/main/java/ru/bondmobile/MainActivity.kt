@@ -60,6 +60,8 @@ private fun BondApp(model: PortfolioViewModel, updates: UpdateViewModel) {
     val preview by model.preview.collectAsStateWithLifecycle()
     val snackbars = remember { SnackbarHostState() }
     var page by rememberSaveable { mutableStateOf(Page.PORTFOLIO) }
+    var positionSort by rememberSaveable { mutableStateOf(PositionSort.NAME) }
+    var positionsAscending by rememberSaveable { mutableStateOf(true) }
     var details by rememberSaveable { mutableStateOf<String?>(null) }
     var editor by remember { mutableStateOf<TradeDraft?>(null) }
     var namingPortfolio by rememberSaveable { mutableStateOf(false) }
@@ -109,7 +111,8 @@ private fun BondApp(model: PortfolioViewModel, updates: UpdateViewModel) {
                     { editor = TradeDraft(bond, null) }, { editor = TradeDraft(bond, it) })
             } else when (page) {
                 Page.PORTFOLIO -> PortfolioPage(data, busy, { model.refresh() },
-                    { editor = TradeDraft() }, { details = it }, { page = Page.PAYMENTS }, scopePicker)
+                    { editor = TradeDraft() }, { details = it }, { page = Page.PAYMENTS }, scopePicker,
+                    positionSort, positionsAscending, { positionSort = it }, { positionsAscending = !positionsAscending })
                 Page.TRADES -> TradesPage(data, { editor = TradeDraft() }, { trade ->
                     editor = TradeDraft(data.bondsByIsin[trade.isin], trade)
                 }, scopePicker)

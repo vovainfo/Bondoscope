@@ -33,10 +33,13 @@ data class Bond(
     val calendarUpdatedAt: Long = 0,
     val historyStart: String? = null,
     val defaultStatus: BondDefaultStatus? = null,
-    val paymentsUnverifiedThrough: String? = null
+    val paymentsUnverifiedThrough: String? = null,
+    val offerDate: String? = null
 ) {
     fun requiresPaymentVerification(date: String): Boolean =
         defaultStatus != null || paymentsUnverifiedThrough?.let { date <= it } == true
+
+    fun upcomingOfferDate(today: String): String? = offerDate?.takeIf { it >= today }
 }
 
 const val DEFAULT_PORTFOLIO_ID = "default"

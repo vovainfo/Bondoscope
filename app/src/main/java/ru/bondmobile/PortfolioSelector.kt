@@ -1,6 +1,8 @@
 package ru.bondmobile
 
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.width
@@ -19,8 +21,40 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+
+@Composable
+internal fun PositionSortPicker(
+    sort: PositionSort, ascending: Boolean, select: (PositionSort) -> Unit, reverse: () -> Unit
+) {
+    var expanded by remember { mutableStateOf(false) }
+    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+        Box(Modifier.weight(1f)) {
+            OutlinedButton(onClick = { expanded = true }, modifier = Modifier.fillMaxWidth()) {
+                Text(sort.label, Modifier.weight(1f), maxLines = 1, overflow = TextOverflow.Ellipsis)
+                Spacer(Modifier.width(8.dp))
+                Text("▾")
+            }
+            DropdownMenu(expanded, { expanded = false }) {
+                PositionSort.entries.forEach { option ->
+                    DropdownMenuItem(
+                        text = { Text(option.label) },
+                        onClick = { expanded = false; select(option) },
+                        trailingIcon = if (option == sort) ({ Glyph(Symbol.CHECK) }) else null
+                    )
+                }
+            }
+        }
+        val direction = if (ascending) "По возрастанию" else "По убыванию"
+        OutlinedButton(onClick = reverse, modifier = Modifier.semantics { contentDescription = direction }) {
+            Text(if (ascending) "↑" else "↓")
+        }
+    }
+}
 
 @Composable
 fun PortfolioSelector(

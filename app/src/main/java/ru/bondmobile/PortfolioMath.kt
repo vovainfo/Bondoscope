@@ -2,9 +2,11 @@ package ru.bondmobile
 
 import java.math.BigDecimal
 import java.math.RoundingMode
+import java.text.Collator
 import java.time.LocalDate
 import java.time.YearMonth
 import java.time.temporal.ChronoUnit
+import java.util.Locale
 
 const val MAX_QUOTE_AGE_DAYS = 7L
 
@@ -20,6 +22,14 @@ data class Holding(
 }
 
 enum class QuoteField { PRICE, NOMINAL, ACCRUED }
+
+internal enum class PositionSort(val label: String) {
+    NAME("По алфавиту"),
+    FIRST_TRADE("По дате первой сделки"),
+    MATURITY("По дате погашения"),
+    OFFER("По дате оферты"),
+    QUANTITY("По количеству облигаций")
+}
 
 sealed interface ValuationIssue {
     data object NoQuote : ValuationIssue
@@ -69,6 +79,9 @@ data class MonthlyReceipt(
 class PortfolioMath(private val portfolio: Portfolio) {
     private val trades = portfolio.trades.groupBy { it.isin }
         .mapValues { (_, rows) -> rows.groupBy { it.portfolioId }.values }
+    private val firstTradeDates by lazy {
+        trades.mapValues { (_, accounts) -> accounts.minOf { account -> account.minOf(Trade::date) } }
+    }
     private val quotes = portfolio.quotes.groupBy { it.isin }.mapValues { (_, rows) -> rows.sortedBy { it.date } }
     private val bonds = portfolio.bonds.associateBy { it.isin }
     private val payments = portfolio.payments.filter {
@@ -89,6 +102,48 @@ class PortfolioMath(private val portfolio: Portfolio) {
         val pricingDate = trade.settlement ?: trade.date
         val exactQuote = quoteAt(trade.isin, pricingDate)?.takeIf { it.date == pricingDate }
         return trade.cashFlow(nominalAt(trade.isin, pricingDate, exactQuote), exactQuote?.accrued?.toBigDecimal())
+    }
+
+    fun firstTradeDate(isin: String): String? = firstTradeDates[isin]
+
+    fun maturityDate(bond: Bond): String? = bond.maturity ?: payments[bond.isin]?.redemptionDate()
+
+    internal fun sortedHoldings(
+        holdings: List<Holding>, sort: PositionSort, ascending: Boolean, today: String
+    ): List<Holding> {
+        val collator = Collator.getInstance(Locale.forLanguageTag("ru-RU"))
+        val byName = compareBy<Holding> { collator.getCollationKey(it.bond.name) }.thenBy { it.bond.isin }
+        val dates = nullsLast(if (ascending) naturalOrder<String>() else reverseOrder())
+        val ordering = when (sort) {
+            PositionSort.NAME -> if (ascending) byName else byName.reversed()
+            PositionSort.FIRST_TRADE -> compareBy<Holding, String?>(dates) { firstTradeDate(it.bond.isin) }
+            PositionSort.MATURITY -> compareBy<Holding, String?>(dates) { maturityDate(it.bond) }
+            PositionSort.OFFER -> compareBy<Holding, String?>(dates) { it.bond.upcomingOfferDate(today) }
+            PositionSort.QUANTITY -> if (ascending) compareBy(Holding::quantity) else compareByDescending(Holding::quantity)
+        }
+        return holdings.sortedWith(ordering.then(byName))
+    }
+
+    fun remainingNominal(bond: Bond, date: String): BigDecimal? {
+        if (bond.currency?.isRubles() == false) return null
+        if (closures[bond.isin]?.let { it <= date } == true) return BigDecimal.ZERO
+        val quote = quotes[bond.isin]?.lastOrNull { it.date <= date && it.nominal != null }
+        val snapshotDate = bond.nominalDate
+        val snapshot = bond.nominal
+        val (baseDate, baseNominal) = when {
+            snapshot != null && snapshotDate != null && snapshotDate <= date &&
+                (quote == null || snapshotDate >= quote.date) -> snapshotDate to snapshot
+            quote != null -> quote.date to requireNotNull(quote.nominal)
+            else -> return null
+        }
+        var amount = baseNominal.toBigDecimal()
+        for (payment in payments[bond.isin].orEmpty()) {
+            if ((payment.kind == PaymentKind.AMORTIZATION || payment.kind == PaymentKind.PRINCIPAL) &&
+                payment.date > baseDate && payment.date <= date && !bond.requiresPaymentVerification(payment.date)) {
+                amount -= payment.amountPerBond?.toBigDecimal() ?: return null
+            }
+        }
+        return amount.takeIf { it.signum() >= 0 }
     }
 
     fun estimate(payment: Payment): PaymentEstimate {

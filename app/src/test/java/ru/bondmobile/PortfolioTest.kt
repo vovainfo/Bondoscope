@@ -269,6 +269,71 @@ class PortfolioTest {
     }
 
     @Test
+    fun sortsOpenPositionsInBothDirectionsUsingTradesInTheSelectedPortfolio() {
+        val alpha = bond.copy(name = "Альфа", offerDate = "2027-02-10", maturity = "2029-06-24")
+        val beta = bond.copy(isin = "RU000A10C2L4", name = "Бета", offerDate = "2027-01-15")
+        val gamma = bond.copy(isin = "RU000A105M59", name = "Гамма", offerDate = "2026-10-15")
+        val second = NamedPortfolio("second", "Второй")
+        val buy = Trade("a", alpha.isin, TradeSide.BUY, 2, "2026-11-05", null, PriceUnit.RUB_WITH_ACCRUED,
+            "1000", null, null, "0")
+        val data = Portfolio(
+            listOf(gamma, beta, alpha),
+            listOf(buy, buy.copy(id = "b", isin = beta.isin, quantity = 50, date = "2026-11-04"),
+                buy.copy(id = "c", isin = gamma.isin, quantity = 8, date = "2026-11-06"),
+                buy.copy(id = "a2", date = "2026-11-02", quantity = 100, portfolioId = second.id)),
+            listOf(Payment("maturity", beta.isin, PaymentKind.REDEMPTION, "2027-07-14", null, "1000")),
+            accounts = listOf(defaultPortfolio, second)
+        )
+        val date = "2026-11-21"
+        fun sorted(sort: PositionSort, ascending: Boolean = true, scope: String? = null): List<String> {
+            val math = PortfolioMath(data.scoped(scope))
+            val positions = math.overview(day(date)).holdings
+            return math.sortedHoldings(positions, sort, ascending, date).map { it.bond.name }
+        }
+        assertEquals(listOf("Альфа", "Бета", "Гамма"), sorted(PositionSort.NAME))
+        assertEquals(listOf("Гамма", "Бета", "Альфа"), sorted(PositionSort.NAME, false))
+        assertEquals(listOf("Альфа", "Бета", "Гамма"), sorted(PositionSort.FIRST_TRADE))
+        assertEquals(listOf("Бета", "Альфа", "Гамма"), sorted(PositionSort.FIRST_TRADE, scope = DEFAULT_PORTFOLIO_ID))
+        assertEquals(listOf("Бета", "Альфа", "Гамма"), sorted(PositionSort.MATURITY))
+        assertEquals(listOf("Альфа", "Бета", "Гамма"), sorted(PositionSort.MATURITY, false))
+        assertEquals(listOf("Бета", "Альфа", "Гамма"), sorted(PositionSort.OFFER))
+        assertEquals(listOf("Альфа", "Бета", "Гамма"), sorted(PositionSort.OFFER, false))
+        assertEquals(listOf("Гамма", "Бета", "Альфа"), sorted(PositionSort.QUANTITY))
+        assertEquals(listOf("Альфа", "Бета", "Гамма"), sorted(PositionSort.QUANTITY, false))
+    }
+
+    @Test
+    fun usesTheRemainingNominalAfterAmortizationWithoutReducingItTwice() {
+        val quote = Quote(isin, "2026-10-23", "100", "390.60", "0")
+        val past = Payment("past", isin, PaymentKind.AMORTIZATION, "2026-10-25", null, "27.70")
+        val future = past.copy(id = "future", date = "2026-11-24")
+        val data = Portfolio(listOf(bond), payments = listOf(past, future), quotes = listOf(quote))
+        val math = PortfolioMath(data)
+        assertMoney("390.60", math.remainingNominal(bond, quote.date))
+        assertMoney("362.90", math.remainingNominal(bond, "2026-11-21"))
+        assertMoney("335.20", math.remainingNominal(bond, future.date))
+        val snapshot = bond.copy(nominal = "362.90", nominalDate = "2026-11-21")
+        assertMoney("362.90", math.remainingNominal(snapshot, "2026-11-21"))
+        assertMoney("390.60", math.remainingNominal(bond.copy(defaultStatus = BondDefaultStatus.DEFAULT), "2026-11-21"))
+        val unknown = data.copy(payments = listOf(past.copy(amountPerBond = null)))
+        assertNull(PortfolioMath(unknown).remainingNominal(bond, "2026-11-21"))
+    }
+
+    @Test
+    fun readsPublishedOfferDatesAndPreservesThemInBackups() {
+        val rows = listOf("0000-00-00", "2027-02-10", "2026-10-15", "2027-02-10", "2028-04-04")
+            .map { JSONObject().put("offerdate", it) }
+        val offers = Moex().decodeOfferDates(rows)
+        assertEquals(listOf("2026-10-15", "2027-02-10", "2028-04-04"), offers)
+        val today = "2026-11-21"
+        val withOffer = bond.copy(offerDate = offers.firstOrNull { it >= today })
+        assertEquals("2027-02-10", withOffer.upcomingOfferDate(today))
+        val portfolio = Portfolio(listOf(withOffer))
+        val json = ByteArrayOutputStream().apply { Backup.write(portfolio, this) }.toByteArray()
+        assertEquals(portfolio, Backup.read(ByteArrayInputStream(json), day(today)))
+    }
+
+    @Test
     fun anotherPortfolioCannotCoverAnUnmatchedSale() {
         val buy = Trade("buy", isin, TradeSide.BUY, 10, "2025-05-02", null, PriceUnit.RUB_WITH_ACCRUED,
             "1000", null, null, "0")
