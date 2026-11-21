@@ -50,7 +50,7 @@ import java.math.BigDecimal
 import kotlin.math.roundToInt
 
 @Composable
-private fun PageList(content: LazyListScope.() -> Unit) {
+internal fun PageList(content: LazyListScope.() -> Unit) {
     LazyColumn(
         Modifier.fillMaxSize(), contentPadding = PaddingValues(start = 18.dp, top = 18.dp, end = 18.dp, bottom = 22.dp),
         verticalArrangement = Arrangement.spacedBy(12.dp), content = content

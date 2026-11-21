@@ -36,21 +36,23 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 
 class MainActivity : ComponentActivity() {
     private val portfolioModel by viewModels<PortfolioViewModel>()
+    private val updateModel by viewModels<UpdateViewModel>()
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
-        setContent { BondTheme { BondApp(portfolioModel) } }
+        setContent { BondTheme { BondApp(portfolioModel, updateModel) } }
     }
 }
 
 private enum class Page(val label: String, val icon: Symbol) {
     PORTFOLIO("Портфель", Symbol.CHART), TRADES("Сделки", Symbol.LIST),
-    PAYMENTS("Выплаты", Symbol.CALENDAR), BACKUP("Копия", Symbol.FOLDER)
+    PAYMENTS("Выплаты", Symbol.CALENDAR), BACKUP("Копия", Symbol.FOLDER),
+    VERSION("Версия", Symbol.REFRESH)
 }
 
 @Composable
-private fun BondApp(model: PortfolioViewModel) {
+private fun BondApp(model: PortfolioViewModel, updates: UpdateViewModel) {
     val context = LocalContext.current
     val data by model.dashboard.collectAsStateWithLifecycle()
     val busy by model.busy.collectAsStateWithLifecycle()
@@ -105,6 +107,7 @@ private fun BondApp(model: PortfolioViewModel) {
                     editor = TradeDraft(data.bondsByIsin[trade.isin], trade)
                 })
                 Page.PAYMENTS -> PaymentsPage(data)
+                Page.VERSION -> UpdatePage(updates)
                 Page.BACKUP -> BackupPage(data, { export.launch("bond-portfolio-${marketToday()}.json") },
                     { import.launch(arrayOf("application/json", "text/plain", "application/octet-stream")) },
                     {
