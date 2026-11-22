@@ -120,6 +120,13 @@ APK находится в `app/build/outputs/apk/debug/app-debug.apk`.
 
 ### Публикация релиза
 
-Увеличьте `versionCode` и `versionName`. Прикрепите к релизу `v<versionName>` файл `Bondoscope-<versionName>.apk`, подписанный тем же ключом, что и предыдущие версии.
+Увеличьте `versionCode` и `versionName`, отправьте коммит в `main` и поставьте на него тег `v<versionName>`. Например, для версии 1.4.13 выполните следующие команды после отправки коммита.
 
-При ограничении API GitHub приложение читает файл `bondoscope-update.json` из последнего релиза. Включите в него поля `tag_name`, `draft`, `prerelease` и массив `assets` с записью APK. Для APK нужны поля `name`, `state` (`uploaded`), `size` в байтах, `digest` в формате `sha256:<хеш>` и `browser_download_url`.
+```powershell
+git tag -a v1.4.13 -m "Бондоскоп 1.4.13"
+git push origin refs/tags/v1.4.13
+```
+
+GitHub Actions запустит тесты, соберёт и подпишет APK. Релиз становится публичным после загрузки APK и `bondoscope-update.json` и сверки их контрольных сумм. Этот JSON используется приложением для проверки обновлений при ограничении API GitHub. [Сборки Android release](https://github.com/vovainfo/Bondoscope/actions/workflows/release.yml)
+
+Для контрольной сборки выберите `main` и нажмите **Run workflow**. Подписанный APK и JSON появятся в артефактах запуска. Ключ подписи хранится в секретах окружения `apk-release`. При сборке его сертификат сверяется с сертификатом установленных версий.
