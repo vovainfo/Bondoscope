@@ -2,10 +2,8 @@ package ru.bondmobile
 
 import android.content.Intent
 import android.net.Uri
-import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
-import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -15,7 +13,6 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyListScope
@@ -36,20 +33,15 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.StrokeCap
-import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalContext
-import androidx.compose.ui.semantics.contentDescription
-import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.core.net.toUri
 import java.math.BigDecimal
-import kotlin.math.roundToInt
+import java.time.LocalDate
 
 private fun Quote?.pricePercentLabel(): String = this?.cleanPercent?.let { "${decimalLabel(it)} %" } ?: "—"
 
@@ -134,6 +126,7 @@ internal fun PortfolioPage(data: Dashboard, busy: Boolean, refresh: () -> Unit, 
             else item { PositionSortPicker(sort, ascending, selectSort, reverseSort) }
             items(holdings, key = { it.bond.isin }) { h ->
                 val nominal = remember(data, h.bond) { data.math.remainingNominal(h.bond, today) }
+                val change = remember(data, h.quote) { h.quote?.let(data.math::quoteChange) }
                 val sortDate = when (sort) {
                     PositionSort.FIRST_TRADE -> "Первая сделка · ${dateLabel(data.math.firstTradeDate(h.bond.isin), true)}"
                     PositionSort.MATURITY -> "Погашение · ${dateLabel(data.math.maturityDate(h.bond), true)}"
@@ -156,6 +149,18 @@ internal fun PortfolioPage(data: Dashboard, busy: Boolean, refresh: () -> Unit, 
                         val label = if (h.estimatedAccrued != null) "Расчётная оценка по котировке от" else "Котировка от"
                         Text("$label ${dateLabel(it, short = true)}",
                             color = if (h.estimatedAccrued != null) Amber else Muted, style = MaterialTheme.typography.bodySmall)
+                    }
+                    change?.let {
+                        val sign = it.percentagePoints.signum()
+                        val prefix = when {
+                            sign > 0 -> "+"
+                            sign < 0 -> "−"
+                            else -> ""
+                        }
+                        val number = decimalLabel(it.percentagePoints.abs().toPlainString())
+                        Text("$prefix$number п.п. к ${dateLabel(it.previousDate, short = true)}",
+                            color = if (sign > 0) Forest else if (sign < 0) Rust else Muted,
+                            style = MaterialTheme.typography.bodySmall)
                     }
                     h.bond.defaultStatus?.let { Text(it.label, color = Amber, style = MaterialTheme.typography.bodySmall) }
                     h.issue?.let { Text(it.description(), color = Amber, style = MaterialTheme.typography.bodySmall) }
@@ -199,29 +204,28 @@ private fun HistoryChart(points: List<PortfolioPoint>) {
     var range by rememberSaveable { mutableStateOf(90) }
     var selected by remember(points, range, showResult) { mutableStateOf<Int?>(null) }
     val visible = remember(points, range) { if (range == 0) points else points.takeLast(range) }
-    val nums = remember(visible, showResult) { visible.map { if (showResult) it.result else it.value } }
-    val approximate = remember(visible, showResult) {
+    val line = remember(visible, showResult) {
         visible.map {
-            if (showResult) it.resultIsPartial || it.resultUsesEstimatedValuation
-            else it.valueIsPartial || it.usesEstimatedValuation
+            if (showResult) LinePoint(it.date, it.result, it.resultIsPartial || it.resultUsesEstimatedValuation)
+            else LinePoint(it.date, it.value, it.valueIsPartial || it.usesEstimatedValuation, it.valueIsPartial)
         }
     }
-    val known = remember(nums) { nums.filterNotNull() }
+    val lastKnown = remember(line) { line.indexOfLast { it.value != null } }
     Sheet {
         Text("Динамика", style = MaterialTheme.typography.titleLarge)
         Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
             FilterChip(!showResult, { showResult = false }, { Text("Стоимость") })
             FilterChip(showResult, { showResult = true }, { Text("Результат") })
         }
-        if (known.isEmpty()) {
+        if (lastKnown == -1) {
             val message = if (showResult) "График появится, когда будет достаточно котировок и данных о сделках."
                 else "За этот период нет данных для оценки позиций."
             Text(message, color = Muted)
         } else {
-            val scale = remember(known) { MoneyScale(known.min(), known.max()) }
-            val activeIndex = selected ?: nums.indexOfLast { it != null }
+            val activeIndex = selected ?: lastKnown
             val selectedPoint = visible.getOrNull(activeIndex)
-            Text("${dateLabel(selectedPoint?.date?.toString(), short = true)}  ·  ${rubles(nums.getOrNull(activeIndex))}",
+            val amount = line.getOrNull(activeIndex)?.value
+            Text("${dateLabel(selectedPoint?.date?.toString(), short = true)}  ·  ${rubles(amount)}",
                 style = MaterialTheme.typography.titleMedium)
             if (showResult && selectedPoint?.resultIsPartial == true) {
                 Text("Частичный результат · ${selectedPoint.issuesWithResult} из ${selectedPoint.issuesTracked} выпусков",
@@ -233,58 +237,40 @@ private fun HistoryChart(points: List<PortfolioPoint>) {
             }
             val selectedUsesEstimate = if (showResult) selectedPoint?.resultUsesEstimatedValuation
                 else selectedPoint?.usesEstimatedValuation
-            if (selectedUsesEstimate == true && nums.getOrNull(activeIndex) != null) {
+            if (selectedUsesEstimate == true && amount != null) {
                 Text("Точка включает расчётную стоимость", color = Amber, style = MaterialTheme.typography.bodySmall)
             }
-            val plotHeight = 150.dp
-            val horizontalInset = 6.dp
-            MoneyChart(scale, plotHeight) {
-                Canvas(Modifier.fillMaxWidth().height(plotHeight).semantics {
-                    contentDescription = "График ${if (showResult) "финансового результата" else "стоимости портфеля"}"
-                }.pointerInput(nums) {
-                    detectTapGestures { tap ->
-                        val inset = horizontalInset.toPx()
-                        val width = (size.width - 2 * inset).coerceAtLeast(1f)
-                        selected = (((tap.x - inset) / width) * nums.lastIndex).roundToInt().coerceIn(0, nums.lastIndex)
-                    }
-                }) {
-                    val pad = horizontalInset.toPx()
-                    val inset = chartAxisInset.toPx()
-                    fun xy(index: Int, number: BigDecimal): Offset {
-                        val x = if (nums.size == 1) size.width / 2
-                            else pad + index.toFloat() / nums.lastIndex * (size.width - 2 * pad)
-                        return Offset(x, scale.y(number, size.height, inset))
-                    }
-                    drawMoneyGrid(scale)
-                    var previous: Offset? = null
-                    nums.forEachIndexed { index, number ->
-                        val here = number?.let { xy(index, it) }
-                        if (here != null) {
-                            previous?.let {
-                                val partial = !showResult && (visible[index - 1].valueIsPartial || visible[index].valueIsPartial)
-                                drawLine(if (partial) Amber else Forest, it, here, 2.dp.toPx(), StrokeCap.Round)
-                            } ?: drawCircle(Forest, 2.dp.toPx(), here)
-                            if (approximate[index]) drawCircle(Amber, 2.dp.toPx(), here)
-                        }
-                        previous = here
-                    }
-                    nums.getOrNull(activeIndex)?.let { number ->
-                        val point = xy(activeIndex, number)
-                        drawLine(Divider, Offset(point.x, 0f), Offset(point.x, size.height), 1.dp.toPx())
-                        drawCircle(if (approximate[activeIndex]) Amber else Forest, 4.dp.toPx(), point)
-                    }
-                }
-                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-                    Text(dateLabel(visible.firstOrNull()?.date?.toString(), short = true), color = Muted)
-                    Text(dateLabel(visible.lastOrNull()?.date?.toString(), short = true), color = Muted)
-                }
-            }
+            LineChart(line, activeIndex, ChartUnit.RUBLES,
+                "График ${if (showResult) "финансового результата" else "стоимости портфеля"}") { selected = it }
         }
-        Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-            listOf(30 to "1 мес", 90 to "3 мес", 365 to "1 год", 0 to "Всё").forEach { (days, label) ->
-                FilterChip(range == days, { range = days }, { Text(label, maxLines = 1) })
-            }
+        ChartPeriodPicker(range) { range = it }
+    }
+}
+
+@Composable
+private fun BondPriceChart(isin: String, quotes: List<Quote>) {
+    var range by rememberSaveable(isin) { mutableStateOf(90) }
+    val visible = remember(quotes, range) {
+        if (range == 0 || quotes.isEmpty()) quotes else {
+            val cutoff = LocalDate.parse(quotes.last().date).minusDays(range.toLong() - 1).toString()
+            quotes.dropWhile { it.date < cutoff }
         }
+    }
+    val points = remember(visible) { visible.map { LinePoint(LocalDate.parse(it.date), it.cleanPercent?.toBigDecimal()) } }
+    var selected by remember(visible) { mutableStateOf<Int?>(null) }
+    Sheet {
+        Text("Динамика цены", style = MaterialTheme.typography.titleLarge)
+        Text("Чистая цена, % от номинала", color = Muted, style = MaterialTheme.typography.bodySmall)
+        if (points.isEmpty()) {
+            Text("График появится после загрузки котировок.", color = Muted)
+        } else {
+            val activeIndex = selected ?: points.lastIndex
+            val quote = visible[activeIndex]
+            Text("${dateLabel(quote.date, short = true)}  ·  ${quote.pricePercentLabel()}",
+                style = MaterialTheme.typography.titleMedium)
+            LineChart(points, activeIndex, ChartUnit.PERCENT, "График цены облигации в процентах") { selected = it }
+        }
+        ChartPeriodPicker(range) { range = it }
     }
 }
 
@@ -406,8 +392,10 @@ fun BondDetails(data: Dashboard, bond: Bond, busy: Boolean, back: () -> Unit, re
     val nominal = remember(data, bond) { data.math.remainingNominal(bond, today) }
     val holding = data.overview.holdings.find { it.bond.isin == bond.isin }
     val recent = data.portfolio.quotes.filter { it.isin == bond.isin }.maxByOrNull { it.date }
+    val priceQuotes = remember(data, bond.isin) { data.math.priceQuotes(bond.isin) }
     val trades = data.portfolio.trades.filter { it.isin == bond.isin }.sortedByDescending { it.date }
-    val payouts = data.payments.filter { it.isin == bond.isin }.sortedByDescending { it.date }
+    val payouts = remember(data, bond.isin) { data.math.issuePayments(bond.isin, today) }
+    val offerDate = bond.upcomingOfferDate(today)
     PageList {
         item { PageHeader(bond.name, "${bond.secid} · ${bond.isin}", busy, refresh, back) }
         item {
@@ -423,7 +411,7 @@ fun BondDetails(data: Dashboard, bond: Bond, busy: Boolean, back: () -> Unit, re
                 InfoRow("НКД по последней котировке", rubles(recent?.accrued?.toBigDecimalOrNull()))
                 InfoRow("Дата последней котировки", dateLabel(recent?.date, true))
                 InfoRow("Плановое погашение", dateLabel(data.math.maturityDate(bond), true))
-                InfoRow("Ближайшая оферта", dateLabel(bond.upcomingOfferDate(today), true))
+                InfoRow("Ближайшая оферта", dateLabel(offerDate, true))
                 InfoRow("Календарь обновлён", if (bond.calendarUpdatedAt > 0) instantLabel(bond.calendarUpdatedAt) else "Ещё не загружен")
                 TextButton(onClick = {
                     val ticker = Uri.encode(bond.secid.lowercase())
@@ -437,12 +425,36 @@ fun BondDetails(data: Dashboard, bond: Bond, busy: Boolean, back: () -> Unit, re
                 }
             }
         }
+        item { BondPriceChart(bond.isin, priceQuotes) }
+        if (offerDate != null) {
+            bond.offerDetails?.let { offer ->
+                item { BondOfferDetails(offerDate, offer) }
+            }
+        }
         item { Button(onClick = add) { Glyph(Symbol.PLUS); Text("Добавить сделку") } }
         item { SectionTitle("Сделки") }
         items(trades, key = { it.id }) { item -> TradeRow(data, item) { edit(item) } }
         item { SectionTitle("Выплаты по выпуску") }
         if (payouts.isEmpty()) item { Sheet { Text("Данные о выплатах пока отсутствуют", color = Muted) } }
         items(payouts, key = { it.id }) { item -> PaymentRow(data, item) }
+    }
+}
+
+@Composable
+private fun BondOfferDetails(date: String, offer: OfferDetails) {
+    fun moneyLabel(amount: String): String = if (offer.currency?.isRubles() == true) rubles(amount.toBigDecimal())
+        else listOfNotNull(decimalLabel(amount), offer.currency).joinToString(" ")
+
+    Sheet {
+        Text("Условия оферты", style = MaterialTheme.typography.titleLarge)
+        InfoRow("Дата оферты", dateLabel(date, true))
+        offer.type?.let { InfoRow("Тип оферты", it) }
+        offer.startDate?.let { InfoRow("Подача заявок с", dateLabel(it, true)) }
+        offer.endDate?.let { InfoRow("Подача заявок по", dateLabel(it, true)) }
+        offer.pricePercent?.let { InfoRow("Цена выкупа", "${decimalLabel(it)} % от номинала") }
+        offer.amount?.let { InfoRow("Сумма на бумагу", moneyLabel(it)) }
+        offer.nominal?.let { InfoRow("Номинал по оферте", moneyLabel(it)) }
+        offer.agent?.let { InfoRow("Агент", it) }
     }
 }
 

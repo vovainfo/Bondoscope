@@ -51,7 +51,7 @@ interface PortfolioDao {
     @Query("DELETE FROM payments WHERE id = :id") suspend fun deletePayment(id: String)
 }
 
-@Database(entities = [Bond::class, Trade::class, Payment::class, Quote::class, NamedPortfolio::class], version = 4)
+@Database(entities = [Bond::class, Trade::class, Payment::class, Quote::class, NamedPortfolio::class], version = 5)
 abstract class BondDatabase : RoomDatabase() {
     abstract fun portfolio(): PortfolioDao
 }
@@ -96,10 +96,18 @@ internal val migrateOffers = object : Migration(3, 4) {
     }
 }
 
+internal val migrateOfferDetails = object : Migration(4, 5) {
+    override fun migrate(db: SupportSQLiteDatabase) {
+        for (field in listOf("type", "startDate", "endDate", "pricePercent", "amount", "nominal", "currency", "agent")) {
+            db.execSQL("ALTER TABLE bonds ADD COLUMN offer_$field TEXT")
+        }
+    }
+}
+
 class BondApplication : Application() {
     val repository by lazy {
         PortfolioRepository(Room.databaseBuilder(this, BondDatabase::class.java, "portfolio.db")
-            .addMigrations(migratePortfolios, migrateDefaultStatus, migrateOffers)
+            .addMigrations(migratePortfolios, migrateDefaultStatus, migrateOffers, migrateOfferDetails)
             .addCallback(object : RoomDatabase.Callback() {
                 override fun onCreate(db: SupportSQLiteDatabase) = seedDefaultPortfolio(db)
             }).build())
@@ -238,10 +246,11 @@ class PortfolioRepository(private val database: BondDatabase, private val moex: 
         }
 
         val earliest = LocalDate.parse(trades.minOf { it.date }).minusDays(7).coerceAtLeast(earliestDate)
-        val from = if (described.historyStart == null || earliest.toString() < described.historyStart) earliest
-        else maxOf(earliest, today.minusDays(21))
         val maturity = described.maturity?.let(LocalDate::parse)
         val end = minOf(today, maturity ?: today)
+        val historyStart = minOf(earliest, end.minusDays(364)).coerceAtLeast(earliestDate)
+        val from = if (described.historyStart == null || historyStart.toString() < described.historyStart) historyStart
+        else maxOf(historyStart, today.minusDays(21))
         val cachedRecent = dao.recentQuotes(original.isin, from.toString()).associateBy { it.date }
         val quotesTask = async {
             attempt {
@@ -265,16 +274,17 @@ class PortfolioRepository(private val database: BondDatabase, private val moex: 
         }
         val calendar = calendarTask.await().getOrNull()
         val newEvents = calendar?.payments
-        val offerDates = calendar?.offerDates
+        val offers = calendar?.offers
         if (calendar?.complete != true) errors += "${original.secid} · календарь выплат"
-        if (offerDates == null) errors += "${original.secid} · календарь оферт"
+        if (offers == null) errors += "${original.secid} · календарь оферт"
         database.withTransaction {
             val date = today.toString()
+            val nextOffer = offers?.firstOrNull { it.date >= date }
             val record = latestBond.copy(
-                offerDate = if (offerDates == null) latestBond.offerDate
-                    else offerDates.firstOrNull { it >= date },
+                offerDate = if (offers == null) latestBond.offerDate else nextOffer?.date,
+                offerDetails = if (offers == null) latestBond.offerDetails else nextOffer?.details,
                 calendarUpdatedAt = if (calendar?.complete == true) asOf else original.calendarUpdatedAt,
-                historyStart = if (historical != null) minOf(earliest.toString(), original.historyStart ?: "9999-12-31")
+                historyStart = if (historical != null) minOf(historyStart.toString(), original.historyStart ?: "9999-12-31")
                 else original.historyStart
             )
             dao.writeBond(record)

@@ -69,6 +69,8 @@ data class Overview(
 
 data class PaymentEstimate(val units: Long?, val amount: BigDecimal?)
 
+internal data class QuoteChange(val previousDate: String, val percentagePoints: BigDecimal)
+
 data class MonthlyReceipt(
     val coupons: BigDecimal = BigDecimal.ZERO,
     val principal: BigDecimal = BigDecimal.ZERO,
@@ -106,6 +108,21 @@ class PortfolioMath(private val portfolio: Portfolio) {
     }
 
     fun firstTradeDate(isin: String): String? = firstTradeDates[isin]
+
+    internal fun priceQuotes(isin: String): List<Quote> =
+        quotes[isin].orEmpty().filter { it.cleanPercent != null }
+
+    internal fun quoteChange(quote: Quote): QuoteChange? {
+        val price = quote.cleanPercent?.toBigDecimal() ?: return null
+        val previous = quotes[quote.isin].orEmpty().lastOrNull { it.date < quote.date && it.cleanPercent != null }
+            ?: return null
+        return QuoteChange(previous.date, price - requireNotNull(previous.cleanPercent).toBigDecimal())
+    }
+
+    internal fun issuePayments(isin: String, today: String): List<Payment> {
+        val (planned, elapsed) = candidates.filter { it.isin == isin }.partition { it.date > today }
+        return planned.sortedBy { it.date } + elapsed.sortedByDescending { it.date }
+    }
 
     fun maturityDate(bond: Bond): String? = bond.maturity ?: payments[bond.isin]?.redemptionDate()
 

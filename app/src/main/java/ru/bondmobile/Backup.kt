@@ -22,7 +22,11 @@ object Backup {
                     "nominalDate" to it.nominalDate, "updatedAt" to it.updatedAt,
                     "calendarUpdatedAt" to it.calendarUpdatedAt, "historyStart" to it.historyStart,
                     "defaultStatus" to it.defaultStatus?.name, "paymentsUnverifiedThrough" to it.paymentsUnverifiedThrough,
-                    "offerDate" to it.offerDate)
+                    "offerDate" to it.offerDate, "offerDetails" to it.offerDetails?.let { offer ->
+                        obj("type" to offer.type, "startDate" to offer.startDate, "endDate" to offer.endDate,
+                            "pricePercent" to offer.pricePercent, "amount" to offer.amount, "nominal" to offer.nominal,
+                            "currency" to offer.currency, "agent" to offer.agent)
+                    })
             },
             "trades" to array(portfolio.trades) {
                 obj("id" to it.id, "isin" to it.isin, "side" to it.side.name, "quantity" to it.quantity,
@@ -64,11 +68,18 @@ object Backup {
         require(accountIds.size == accounts.size && DEFAULT_PORTFOLIO_ID in accountIds) { "В копии повреждён список портфелей" }
         val maxTradeDate = today.toString()
         val bonds = root.list("bonds", 5_000) {
+            val offerDate = day("offerDate")
+            val offerDetails = if (offerDate == null || isNull("offerDetails")) null else getJSONObject("offerDetails").run {
+                OfferDetails(optional("type", 189), day("startDate"), day("endDate"),
+                    number("pricePercent"), number("amount"), number("nominal"), optional("currency", 10),
+                    optional("agent", 384)).takeUnless { it == OfferDetails() }
+            }
             Bond(isin(), text("secid", 40), text("name", 300), optional("board", 25), day("maturity"),
                 optional("currency", 10), number("nominal"), day("nominalDate"),
                 optLong("updatedAt").coerceIn(0, System.currentTimeMillis()),
                 optLong("calendarUpdatedAt").coerceIn(0, System.currentTimeMillis()), day("historyStart"),
-                optional("defaultStatus", 24)?.let(BondDefaultStatus::valueOf), day("paymentsUnverifiedThrough"), day("offerDate"))
+                optional("defaultStatus", 24)?.let(BondDefaultStatus::valueOf), day("paymentsUnverifiedThrough"),
+                offerDate, offerDetails)
         }
         val trades = root.list("trades", 50_000) {
             val date = day("date") ?: error("В сделке пропущена дата")

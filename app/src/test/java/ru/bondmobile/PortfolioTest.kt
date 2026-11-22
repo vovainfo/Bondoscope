@@ -324,17 +324,62 @@ class PortfolioTest {
     }
 
     @Test
-    fun readsPublishedOfferDatesAndPreservesThemInBackups() {
-        val rows = listOf("0000-00-00", "2027-02-10", "2026-10-15", "2027-02-10", "2028-04-04")
-            .map { JSONObject().put("offerdate", it) }
-        val offers = Moex().decodeOfferDates(rows)
-        assertEquals(listOf("2026-10-15", "2027-02-10", "2028-04-04"), offers)
+    fun readsPublishedOfferDetailsAndRestoresDateOnlyBackups() {
+        val rows = listOf("0000-00-00", "2027-01-13", "2026-10-15", "2028-04-04")
+            .map { JSONObject().put("offerdate", it) } + JSONObject().apply {
+            put("offerdate", "2027-01-13")
+            put("offerdatestart", "2026-12-25")
+            put("offerdateend", "2026-12-31")
+            put("offertype", "Оферта")
+            put("facevalue", 1000)
+            put("faceunit", "RUB")
+            put("price", 100)
+            put("value", 1000)
+            put("agent", "Агент по выкупу")
+        }
+        val offers = Moex().decodeOffers(rows)
+        assertEquals(listOf("2026-10-15", "2027-01-13", "2028-04-04"), offers.map { it.date })
+        assertNull(offers.first().details)
         val today = "2026-11-21"
-        val withOffer = bond.copy(offerDate = offers.firstOrNull { it >= today })
-        assertEquals("2027-02-10", withOffer.upcomingOfferDate(today))
+        val next = offers.first { it.date >= today }
+        assertEquals(OfferDetails("Оферта", "2026-12-25", "2026-12-31", "100", "1000",
+            "1000", "RUB", "Агент по выкупу"), next.details)
+        val withOffer = bond.copy(offerDate = next.date, offerDetails = next.details)
+        assertEquals("2027-01-13", withOffer.upcomingOfferDate(today))
         val portfolio = Portfolio(listOf(withOffer))
         val json = ByteArrayOutputStream().apply { Backup.write(portfolio, this) }.toByteArray()
         assertEquals(portfolio, Backup.read(ByteArrayInputStream(json), day(today)))
+        val legacy = JSONObject(String(json, Charsets.UTF_8)).apply {
+            getJSONArray("bonds").getJSONObject(0).remove("offerDetails")
+        }
+        assertEquals(withOffer.copy(offerDetails = null),
+            Backup.read(ByteArrayInputStream(legacy.toString().toByteArray()), day(today)).bonds.single())
+    }
+
+    @Test
+    fun comparesPricesAcrossGapsUsingThePreviousDatedPrice() {
+        val friday = Quote(isin, "2026-11-20", "97.2", "1000", null)
+        val sunday = friday.copy(date = "2026-11-22", cleanPercent = null)
+        val monday = friday.copy(date = "2026-11-23", cleanPercent = "96.35")
+        val other = friday.copy(isin = "RU000A10GDW3", date = "2026-11-22")
+        val math = PortfolioMath(Portfolio(quotes = listOf(monday, other, friday, sunday)))
+        assertEquals(listOf(friday, monday), math.priceQuotes(isin))
+        assertNull(math.quoteChange(friday))
+        assertNull(math.quoteChange(sunday))
+        val change = requireNotNull(math.quoteChange(monday))
+        assertEquals(friday.date, change.previousDate)
+        assertMoney("-0.85", change.percentagePoints)
+    }
+
+    @Test
+    fun listsPlannedIssuePaymentsFromNearestToFarthestAndKeepsHistoryRecentFirst() {
+        val buy = Trade("buy", isin, TradeSide.BUY, 1, "2026-10-01", null, PriceUnit.RUB_WITH_ACCRUED,
+            "1000", null, null, "0")
+        val payments = listOf("2027-01-10", "2026-11-10", "2026-12-10", "2026-10-10")
+            .map { date -> Payment(date, isin, PaymentKind.COUPON, date, null, "10") }
+        val math = PortfolioMath(Portfolio(listOf(bond), listOf(buy), payments))
+        assertEquals(listOf("2026-12-10", "2027-01-10", "2026-11-10", "2026-10-10"),
+            math.issuePayments(isin, "2026-11-21").map { it.date })
     }
 
     @Test

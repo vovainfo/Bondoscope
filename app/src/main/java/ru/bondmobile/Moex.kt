@@ -16,7 +16,8 @@ import java.time.LocalDate
 import java.util.Locale
 import javax.net.ssl.HttpsURLConnection
 
-data class BondCalendar(val payments: List<Payment>, val complete: Boolean, val offerDates: List<String>?)
+data class BondOffer(val date: String, val details: OfferDetails?)
+data class BondCalendar(val payments: List<Payment>, val complete: Boolean, val offers: List<BondOffer>?)
 
 internal data class PlacementBoard(
     val secid: String,
@@ -172,11 +173,28 @@ class Moex {
         val couponRows = couponTask.await()
         val principalRows = principalTask.await()
         BondCalendar(decodeCalendar(bond, couponRows.orEmpty(), principalRows.orEmpty()),
-            couponRows != null && principalRows != null, offersTask.await()?.let(::decodeOfferDates))
+            couponRows != null && principalRows != null, offersTask.await()?.let(::decodeOffers))
     }
 
-    internal fun decodeOfferDates(rows: List<JSONObject>): List<String> =
-        rows.mapNotNull { it.str("offerdate").asDate() }.distinct().sorted()
+    internal fun decodeOffers(rows: List<JSONObject>): List<BondOffer> = rows.mapNotNull { row ->
+        val date = row.str("offerdate").asDate() ?: return@mapNotNull null
+        val details = OfferDetails(
+            type = row.str("offertype"),
+            startDate = row.str("offerdatestart").asDate(),
+            endDate = row.str("offerdateend").asDate(),
+            pricePercent = row.number("price"),
+            amount = row.number("value"),
+            nominal = row.number("facevalue"),
+            currency = row.str("faceunit"),
+            agent = row.str("agent")
+        )
+        BondOffer(date, details.takeUnless { it == OfferDetails() })
+    }.sortedWith(compareBy<BondOffer> { it.date }
+        .thenByDescending { it.details?.endDate != null }
+        .thenByDescending { it.details?.startDate != null }
+        .thenByDescending { it.details?.pricePercent != null || it.details?.amount != null }
+        .thenByDescending { it.details != null })
+        .distinctBy { it.date }
 
     internal fun decodeCalendar(bond: Bond, couponRows: List<JSONObject>, principalRows: List<JSONObject>): List<Payment> {
         val coupons = couponRows.mapNotNull { row ->

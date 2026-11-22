@@ -1,5 +1,6 @@
 package ru.bondmobile
 
+import androidx.room.Embedded
 import androidx.room.Entity
 import androidx.room.ForeignKey
 import androidx.room.Index
@@ -19,6 +20,17 @@ enum class BondDefaultStatus(val label: String) {
 }
 enum class PaymentStatus { PLANNED, BY_CALENDAR, UNVERIFIED }
 
+data class OfferDetails(
+    val type: String? = null,
+    val startDate: String? = null,
+    val endDate: String? = null,
+    val pricePercent: String? = null,
+    val amount: String? = null,
+    val nominal: String? = null,
+    val currency: String? = null,
+    val agent: String? = null
+)
+
 @Entity(tableName = "bonds")
 data class Bond(
     @PrimaryKey val isin: String,
@@ -34,7 +46,8 @@ data class Bond(
     val historyStart: String? = null,
     val defaultStatus: BondDefaultStatus? = null,
     val paymentsUnverifiedThrough: String? = null,
-    val offerDate: String? = null
+    val offerDate: String? = null,
+    @Embedded(prefix = "offer_") val offerDetails: OfferDetails? = null
 ) {
     fun requiresPaymentVerification(date: String): Boolean =
         defaultStatus != null || paymentsUnverifiedThrough?.let { date <= it } == true

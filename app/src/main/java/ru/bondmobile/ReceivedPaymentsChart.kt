@@ -76,7 +76,7 @@ fun ReceivedPaymentsChart(receipts: Map<YearMonth, MonthlyReceipt>, today: Local
         ?: months.findLast { it in receipts } ?: latest
     val chosen = receipts[selected] ?: MonthlyReceipt()
     val upper = months.maxOf { receipts[it]?.total ?: BigDecimal.ZERO }
-    val scale = remember(upper) { MoneyScale(BigDecimal.ZERO, upper) }
+    val scale = remember(upper) { ChartScale(BigDecimal.ZERO, upper) }
 
     Sheet {
         Text("История выплат", style = MaterialTheme.typography.titleLarge)
@@ -90,11 +90,11 @@ fun ReceivedPaymentsChart(receipts: Map<YearMonth, MonthlyReceipt>, today: Local
             Text(selected.displayMonth(), Modifier.weight(1f), style = MaterialTheme.typography.titleMedium)
             Text(rubles(chosen.total), color = Forest, fontWeight = FontWeight.SemiBold)
         }
-        MoneyChart(scale, chartHeight) {
+        AxisChart(scale, chartHeight) {
             BoxWithConstraints(Modifier.fillMaxWidth()) {
                 val columnWidth = (maxWidth / 6).coerceAtLeast(40.dp)
                 Canvas(Modifier.fillMaxWidth().height(chartHeight)) {
-                    drawMoneyGrid(scale)
+                    drawChartGrid(scale)
                 }
                 key(period, first, latest) {
                     val visibleColumns = (maxWidth / columnWidth).toInt().coerceAtLeast(1)
