@@ -494,6 +494,21 @@ class PortfolioTest {
         val overview = math.overview(day("2026-11-23"))
         assertMoney("-100", overview.premium.amount)
         assertEquals(3, overview.premium.valuedPositions)
+        val latest = overview.points.last()
+        assertMoney("2680", latest.value)
+        assertMoney("3700", latest.cleanValue)
+        assertEquals(3, latest.positionsWithCleanValue)
+        assertTrue(latest.cleanValueIsPartial)
+        assertEquals(setOf(noNominal.isin, noQuote.isin),
+            math.cleanValuationIssues(latest.date).map { it.bond.isin }.toSet())
+        val period = math.cleanValueChange(day(friday.date), latest.date)
+        assertEquals(day(friday.date), period.previousDate)
+        assertEquals(latest.date, period.date)
+        assertMoney("-100", period.amount)
+        val amortizationOverPeriod = period.issues.single { it.bond == amortizing }
+        assertMoney("-160", amortizationOverPeriod.amount)
+        assertEquals(listOf(amortization), amortizationOverPeriod.principalEvents)
+
         val change = requireNotNull(overview.premiumChange)
         assertEquals(day(friday.date), change.previousDate)
         assertEquals(day(sunday.date), change.date)
@@ -607,6 +622,8 @@ class PortfolioTest {
         assertMoney("141710", onCoupon.points.first().value)
         assertFalse(onCoupon.points.first().usesEstimatedValuation)
         assertMoney("138620", onCoupon.points.last().value)
+        assertMoney("138620", onCoupon.points.first().cleanValue)
+        assertMoney("138620", onCoupon.points.last().cleanValue)
         assertMoney("1818", onCoupon.points.last().result)
         assertTrue(onCoupon.points.last().usesEstimatedValuation)
 

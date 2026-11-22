@@ -78,7 +78,7 @@ private fun DetailLink(label: String, color: Color, onClick: () -> Unit) {
 }
 
 @Composable
-private fun PremiumChangeLabel(change: PremiumChange, onClick: () -> Unit) {
+private fun PremiumChangeLabel(change: PortfolioPriceChange, onClick: () -> Unit) {
     val amount = change.amount?.setScale(2, RoundingMode.HALF_UP)
     val difference = amount?.let { signedLabel(it, ::rubles) } ?: "—"
     Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
@@ -96,6 +96,8 @@ private fun PremiumChangeLabel(change: PremiumChange, onClick: () -> Unit) {
         }
     }
 }
+
+private enum class BreakdownKind { MARKET, CLEAN, RESULT }
 
 @Composable
 internal fun PageList(content: LazyListScope.() -> Unit) {
@@ -117,10 +119,12 @@ internal fun PortfolioPage(data: Dashboard, busy: Boolean, refresh: () -> Unit, 
     val estimatedCount = holdings.count { it.estimatedAccrued != null }
     val defaultCount = holdings.count { it.bond.defaultStatus != null }
     var detailsDate by rememberSaveable(data.selectedAccount?.id) { mutableStateOf<String?>(null) }
-    var resultDetails by rememberSaveable(data.selectedAccount?.id) { mutableStateOf(false) }
+    var breakdown by rememberSaveable(data.selectedAccount?.id) { mutableStateOf(BreakdownKind.MARKET) }
     var showPremiumChanges by rememberSaveable(data.selectedAccount?.id) { mutableStateOf(false) }
-    fun openDetails(day: LocalDate, forResult: Boolean) {
-        resultDetails = forResult
+    var periodStart by rememberSaveable(data.selectedAccount?.id) { mutableStateOf<String?>(null) }
+    var periodEnd by rememberSaveable(data.selectedAccount?.id) { mutableStateOf<String?>(null) }
+    fun openDetails(day: LocalDate, kind: BreakdownKind) {
+        breakdown = kind
         detailsDate = day.toString()
     }
     val trackedBonds = data.portfolio.trades.map { it.isin }.toSet()
@@ -137,8 +141,23 @@ internal fun PortfolioPage(data: Dashboard, busy: Boolean, refresh: () -> Unit, 
                 verticalArrangement = Arrangement.spacedBy(10.dp)) {
                 Text("Рыночная стоимость", color = Mint, style = MaterialTheme.typography.titleMedium)
                 val amount = if (now != null) now.value else BigDecimal.ZERO
-                Text(rubles(amount), color = Color.White, fontSize = 35.sp, lineHeight = 42.sp, fontWeight = FontWeight.Bold)
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
+                    Text(rubles(amount), Modifier.weight(1f, fill = false), color = Color.White,
+                        fontSize = 35.sp, lineHeight = 42.sp, fontWeight = FontWeight.Bold)
+                    Text("с НКД", color = Mint, style = MaterialTheme.typography.bodySmall)
+                }
                 if (now != null) {
+                    Column(verticalArrangement = Arrangement.spacedBy(3.dp)) {
+                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
+                            Text(rubles(now.cleanValue), color = Color.White, style = MaterialTheme.typography.titleMedium)
+                            Text("без НКД", color = Mint, style = MaterialTheme.typography.bodySmall)
+                        }
+                        if (now.cleanValueIsPartial) {
+                            DetailLink("${now.positionsWithCleanValue} из ${now.openPositions} позиций", Mint) {
+                                openDetails(now.date, BreakdownKind.CLEAN)
+                            }
+                        }
+                    }
                     Column(verticalArrangement = Arrangement.spacedBy(3.dp)) {
                         Text("Отклонение от номинала без НКД", color = Mint, style = MaterialTheme.typography.bodySmall)
                         Text(rubles(total.premium.amount), color = Color.White, style = MaterialTheme.typography.titleMedium)
@@ -159,7 +178,7 @@ internal fun PortfolioPage(data: Dashboard, busy: Boolean, refresh: () -> Unit, 
                     Text("Выпуски с признаками дефолта · $defaultCount", color = Mint)
                 }
                 if (unavailable.isNotEmpty() || estimatedCount > 0) {
-                    TextButton(onClick = { openDetails(data.today, false) }) {
+                    TextButton(onClick = { openDetails(data.today, BreakdownKind.MARKET) }) {
                         Text("Подробности оценки", color = Color.White)
                         Glyph(Symbol.NEXT, color = Color.White)
                     }
@@ -170,7 +189,7 @@ internal fun PortfolioPage(data: Dashboard, busy: Boolean, refresh: () -> Unit, 
                         Text(rubles(now?.result), color = Color.White, style = MaterialTheme.typography.titleMedium)
                         if (now?.resultIsPartial == true) {
                             DetailLink("Частичный · ${now.issuesWithResult} из ${now.issuesTracked} выпусков", Mint) {
-                                openDetails(now.date, true)
+                                openDetails(now.date, BreakdownKind.RESULT)
                             }
                         }
                     }
@@ -185,7 +204,12 @@ internal fun PortfolioPage(data: Dashboard, busy: Boolean, refresh: () -> Unit, 
             EmptyCard(Symbol.PLUS, "Добавьте первую покупку", "Найдите облигацию по тикеру или ISIN и внесите данные сделки.",
                 "Добавить покупку", add)
         } else {
-            item { HistoryChart(total.points, ::openDetails) }
+            item {
+                HistoryChart(total.points, ::openDetails) { start, end ->
+                    periodStart = start.toString()
+                    periodEnd = end.toString()
+                }
+            }
             item {
                 Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
                     Box(Modifier.weight(1f)) { SectionTitle("Позиции") }
@@ -258,10 +282,25 @@ internal fun PortfolioPage(data: Dashboard, busy: Boolean, refresh: () -> Unit, 
     }
     if (showPremiumChanges) {
         total.premiumChange?.let { change ->
-            PremiumChangeDialog(change, { showPremiumChanges = false }) { isin ->
+            PriceChangeDialog(change, forPeriod = false, close = { showPremiumChanges = false }) { isin ->
                 showPremiumChanges = false
                 openBond(isin)
             }
+        }
+    }
+    val start = periodStart
+    val end = periodEnd
+    if (start != null && end != null) {
+        val changes by produceState<PortfolioPriceChange?>(null, data, start, end) {
+            value = withContext(Dispatchers.Default) { data.math.cleanValueChange(LocalDate.parse(start), LocalDate.parse(end)) }
+        }
+        val close = {
+            periodStart = null
+            periodEnd = null
+        }
+        PriceChangeDialog(changes, forPeriod = true, close = close) { isin ->
+            close()
+            openBond(isin)
         }
     }
     detailsDate?.let { date ->
@@ -271,7 +310,7 @@ internal fun PortfolioPage(data: Dashboard, busy: Boolean, refresh: () -> Unit, 
             dismiss()
             openBond(isin)
         }
-        if (resultDetails) {
+        if (breakdown == BreakdownKind.RESULT) {
             val exclusions by produceState<List<ResultExclusion>?>(null, data, day) {
                 value = null
                 value = withContext(Dispatchers.Default) {
@@ -280,19 +319,22 @@ internal fun PortfolioPage(data: Dashboard, busy: Boolean, refresh: () -> Unit, 
             }
             ResultDetailsDialog(exclusions, day, dismiss, showBond)
         } else {
-            val details by produceState<List<Holding>?>(null, data, day) {
+            val details by produceState<List<Holding>?>(null, data, day, breakdown) {
                 value = withContext(Dispatchers.Default) {
-                    val positions = if (day == data.today) total.holdings else data.math.holdingsAt(day)
-                    positions.filter { it.issue != null || it.estimatedAccrued != null }
+                    if (breakdown == BreakdownKind.CLEAN) data.math.cleanValuationIssues(day)
+                    else total.holdings.filter { it.issue != null || it.estimatedAccrued != null }
                 }
             }
-            ValuationDetailsDialog(details, day.takeUnless { it == data.today }, dismiss, showBond)
+            ValuationDetailsDialog(details, day.takeUnless { it == data.today }, dismiss, showBond,
+                withoutAccrued = breakdown == BreakdownKind.CLEAN)
         }
     }
 }
 
 @Composable
-private fun HistoryChart(points: List<PortfolioPoint>, openDetails: (LocalDate, Boolean) -> Unit) {
+private fun HistoryChart(
+    points: List<PortfolioPoint>, openDetails: (LocalDate, BreakdownKind) -> Unit, openPeriod: (LocalDate, LocalDate) -> Unit
+) {
     var showResult by rememberSaveable { mutableStateOf(false) }
     var range by rememberSaveable { mutableStateOf(90) }
     var selected by remember(points, range, showResult) { mutableStateOf<Int?>(null) }
@@ -300,14 +342,15 @@ private fun HistoryChart(points: List<PortfolioPoint>, openDetails: (LocalDate, 
     val line = remember(visible, showResult) {
         visible.map {
             if (showResult) LinePoint(it.date, it.result, it.resultIsPartial || it.resultUsesEstimatedValuation)
-            else LinePoint(it.date, it.value, it.valueIsPartial || it.usesEstimatedValuation, it.valueIsPartial)
+            else LinePoint(it.date, it.cleanValue, it.cleanValueIsPartial, it.cleanValueIsPartial)
         }
     }
+    val firstKnown = remember(line) { line.indexOfFirst { it.value != null } }
     val lastKnown = remember(line) { line.indexOfLast { it.value != null } }
     Sheet {
         Text("Динамика", style = MaterialTheme.typography.titleLarge)
-        Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-            FilterChip(!showResult, { showResult = false }, { Text("Стоимость") })
+        Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+            FilterChip(!showResult, { showResult = false }, { Text("Стоимость без НКД") })
             FilterChip(showResult, { showResult = true }, { Text("Результат") })
         }
         if (lastKnown == -1) {
@@ -322,23 +365,27 @@ private fun HistoryChart(points: List<PortfolioPoint>, openDetails: (LocalDate, 
                 style = MaterialTheme.typography.titleMedium)
             if (showResult && selectedPoint?.resultIsPartial == true) {
                 DetailLink("Частичный результат · ${selectedPoint.issuesWithResult} из ${selectedPoint.issuesTracked} выпусков", Amber) {
-                    openDetails(selectedPoint.date, true)
+                    openDetails(selectedPoint.date, BreakdownKind.RESULT)
                 }
             }
-            if (!showResult && selectedPoint?.valueIsPartial == true) {
-                DetailLink("Частичная стоимость · ${selectedPoint.positionsWithValue} из ${selectedPoint.openPositions} позиций", Amber) {
-                    openDetails(selectedPoint.date, false)
+            if (!showResult && selectedPoint?.cleanValueIsPartial == true) {
+                DetailLink("Частичная стоимость · ${selectedPoint.positionsWithCleanValue} из ${selectedPoint.openPositions} позиций", Amber) {
+                    openDetails(selectedPoint.date, BreakdownKind.CLEAN)
                 }
             }
-            val selectedUsesEstimate = if (showResult) selectedPoint?.resultUsesEstimatedValuation
-                else selectedPoint?.usesEstimatedValuation
-            if (selectedUsesEstimate == true && amount != null) {
+            if (showResult && selectedPoint?.resultUsesEstimatedValuation == true && amount != null) {
                 Text("Точка включает расчётную стоимость", color = Amber, style = MaterialTheme.typography.bodySmall)
             }
             LineChart(line, activeIndex, ChartUnit.RUBLES,
-                "График ${if (showResult) "финансового результата" else "стоимости портфеля"}") { selected = it }
+                "График ${if (showResult) "финансового результата" else "стоимости портфеля без НКД"}") { selected = it }
         }
         ChartPeriodPicker(range) { range = it }
+        if (!showResult && firstKnown >= 0 && lastKnown > firstKnown) {
+            TextButton(onClick = { openPeriod(line[firstKnown].date, line[lastKnown].date) }) {
+                Text("Подробнее")
+                Glyph(Symbol.NEXT, color = Forest)
+            }
+        }
     }
 }
 

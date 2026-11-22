@@ -41,14 +41,17 @@ internal fun ValuationIssue.description(): String = when (this) {
 }
 
 @Composable
-internal fun ValuationDetailsDialog(holdings: List<Holding>?, day: LocalDate?, close: () -> Unit, openBond: (String) -> Unit) {
+internal fun ValuationDetailsDialog(
+    holdings: List<Holding>?, day: LocalDate?, close: () -> Unit, openBond: (String) -> Unit, withoutAccrued: Boolean
+) {
     val rows = holdings?.map { holding ->
         DetailRow(holding.bond, holding.quoteDate, buildList {
             holding.issue?.let { add(it.description()) }
             holding.estimatedAccrued?.let { add("Расчётный НКД · ${rubles(it)} / шт.") }
         })
     }
-    BreakdownDialog("Подробности оценки", day, rows, "Данные для всех позиций уже получены", close, openBond)
+    val title = if (withoutAccrued) "Оценка без НКД" else "Подробности оценки"
+    BreakdownDialog(title, day, rows, "Данные для всех позиций уже получены", close, openBond)
 }
 
 @Composable
@@ -75,19 +78,34 @@ internal fun ResultDetailsDialog(exclusions: List<ResultExclusion>?, day: LocalD
 }
 
 @Composable
-internal fun PremiumChangeDialog(change: PremiumChange, close: () -> Unit, openBond: (String) -> Unit) {
+internal fun PriceChangeDialog(
+    change: PortfolioPriceChange?, forPeriod: Boolean, close: () -> Unit, openBond: (String) -> Unit
+) {
     AlertDialog(
         onDismissRequest = close,
-        title = { Text("Изменение по выпускам") },
+        title = { Text(if (forPeriod) "Изменение за период" else "Изменение по выпускам") },
         text = {
             LazyColumn(Modifier.fillMaxWidth().heightIn(max = 420.dp)) {
-                item {
-                    Text("${dateLabel(change.previousDate.toString(), true)} → ${dateLabel(change.date.toString(), true)}",
-                        color = Muted)
-                }
-                items(change.issues, key = { it.bond.isin }) { issue ->
-                    IssuePriceChangeRow(issue) { openBond(issue.bond.isin) }
-                    HorizontalDivider(color = Divider)
+                if (change == null) item { Text("Загружаем подробности…", color = Muted) }
+                else {
+                    item {
+                        Text("${dateLabel(change.previousDate.toString(), true)} → ${dateLabel(change.date.toString(), true)}",
+                            color = Muted)
+                    }
+                    if (forPeriod) item {
+                        val amount = change.amount?.setScale(2, RoundingMode.HALF_UP)
+                        val label = amount?.let { signedLabel(it, ::rubles) } ?: "—"
+                        Text("Изменение стоимости без НКД · $label",
+                            color = amount?.let { changeColor(it) } ?: Muted, fontWeight = FontWeight.SemiBold)
+                        if (change.comparablePositions < change.issues.size) {
+                            Text("Сравнение по ${change.comparablePositions} из ${change.issues.size} позиций", color = Muted)
+                        }
+                    }
+                    if (change.issues.isEmpty()) item { Text("На эти даты нет открытых позиций", color = Muted) }
+                    items(change.issues, key = { it.bond.isin }) { issue ->
+                        IssuePriceChangeRow(issue) { openBond(issue.bond.isin) }
+                        HorizontalDivider(color = Divider)
+                    }
                 }
             }
         },
