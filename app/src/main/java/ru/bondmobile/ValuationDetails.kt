@@ -1,6 +1,7 @@
 package ru.bondmobile
 
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -9,12 +10,19 @@ import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.FilterChip
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.font.FontWeight
@@ -81,6 +89,10 @@ internal fun ResultDetailsDialog(exclusions: List<ResultExclusion>?, day: LocalD
 internal fun PriceChangeDialog(
     change: PortfolioPriceChange?, forPeriod: Boolean, close: () -> Unit, openBond: (String) -> Unit
 ) {
+    var sort by rememberSaveable { mutableStateOf(PeriodChangeSort.PERCENTAGE_POINTS) }
+    val issues = remember(change, forPeriod, sort) {
+        if (forPeriod) change?.sortedIssues(sort).orEmpty() else change?.issues.orEmpty()
+    }
     AlertDialog(
         onDismissRequest = close,
         title = { Text(if (forPeriod) "Изменение за период" else "Изменение по выпускам") },
@@ -101,9 +113,18 @@ internal fun PriceChangeDialog(
                             Text("Сравнение по ${change.comparablePositions} из ${change.issues.size} позиций", color = Muted)
                         }
                     }
-                    if (change.issues.isEmpty()) item { Text("На эти даты нет открытых позиций", color = Muted) }
-                    items(change.issues, key = { it.bond.isin }) { issue ->
-                        IssuePriceChangeRow(issue) { openBond(issue.bond.isin) }
+                    if (forPeriod && issues.isNotEmpty()) item {
+                        Text("Сортировка по модулю", color = Muted, style = MaterialTheme.typography.bodySmall)
+                        Row(Modifier.horizontalScroll(rememberScrollState()),
+                            horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                            PeriodChangeSort.entries.forEach { option ->
+                                FilterChip(sort == option, { sort = option }, { Text(option.label, maxLines = 1) })
+                            }
+                        }
+                    }
+                    if (issues.isEmpty()) item { Text("На эти даты нет открытых позиций", color = Muted) }
+                    items(issues, key = { it.bond.isin }) { issue ->
+                        IssuePriceChangeRow(issue, forPeriod) { openBond(issue.bond.isin) }
                         HorizontalDivider(color = Divider)
                     }
                 }
@@ -114,8 +135,10 @@ internal fun PriceChangeDialog(
 }
 
 @Composable
-private fun IssuePriceChangeRow(issue: IssuePriceChange, openBond: () -> Unit) {
-    val percent = issue.percent?.setScale(4, RoundingMode.HALF_UP)
+private fun IssuePriceChangeRow(issue: IssuePriceChange, forPeriod: Boolean, openBond: () -> Unit) {
+    val change = if (forPeriod) issue.percentagePoints else issue.percent
+    val displayedChange = change?.setScale(4, RoundingMode.HALF_UP)
+    val unit = if (forPeriod) "п.п." else "%"
     val before = issue.previousPrice?.let { "${decimalLabel(it.toPlainString())} %" } ?: "—"
     val after = issue.price?.let { "${decimalLabel(it.toPlainString())} %" } ?: "—"
     Column(Modifier.fillMaxWidth().clickable(onClick = openBond).padding(vertical = 10.dp),
@@ -123,11 +146,12 @@ private fun IssuePriceChangeRow(issue: IssuePriceChange, openBond: () -> Unit) {
         Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp),
             verticalAlignment = Alignment.CenterVertically) {
             Text(issue.bond.name, Modifier.weight(1f), style = MaterialTheme.typography.titleMedium)
-            Text(percent?.let { "${signedLabel(it) { value -> decimalLabel(value.toPlainString()) }} %" } ?: "—",
-                color = percent?.let { changeColor(it) } ?: Muted, fontWeight = FontWeight.SemiBold)
+            Text(displayedChange?.let { "${signedLabel(it) { value -> decimalLabel(value.toPlainString()) }} $unit" } ?: "—",
+                color = displayedChange?.let { changeColor(it) } ?: Muted, fontWeight = FontWeight.SemiBold)
             Glyph(Symbol.NEXT, color = Forest)
         }
-        val prices = if (issue.percent == null && issue.previousPrice?.signum() == 1 && issue.price != null)
+        val prices = if (change == null && issue.previousPrice != null && issue.price != null &&
+            (forPeriod || issue.previousPrice.signum() == 1))
             "Нет новой котировки для расчёта изменения цены" else "Чистая цена · $before → $after"
         Text(prices, color = Muted, style = MaterialTheme.typography.bodySmall)
         val amount = issue.amount?.setScale(2, RoundingMode.HALF_UP)

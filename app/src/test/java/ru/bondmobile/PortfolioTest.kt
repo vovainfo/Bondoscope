@@ -482,8 +482,8 @@ class PortfolioTest {
             sunday.copy(isin = noAccrued.isin, accrued = null),
             friday.copy(isin = amortizing.isin, cleanPercent = "80"),
             sunday.copy(isin = amortizing.isin, cleanPercent = "80", nominal = "800"),
-            friday.copy(isin = noNominal.isin, nominal = null),
-            sunday.copy(isin = noNominal.isin, cleanPercent = "88", nominal = null),
+            friday.copy(isin = noNominal.isin, cleanPercent = "80", nominal = null),
+            sunday.copy(isin = noNominal.isin, cleanPercent = "68", nominal = null),
             sunday.copy(isin = unrelated, date = "2026-11-23"))
         val extra = listOf(noAccrued, amortizing, noNominal, noQuote)
         val amortization = Payment("amortization", amortizing.isin, PaymentKind.AMORTIZATION, sunday.date, null, "200")
@@ -505,6 +505,15 @@ class PortfolioTest {
         assertEquals(day(friday.date), period.previousDate)
         assertEquals(latest.date, period.date)
         assertMoney("-100", period.amount)
+        val byPoints = period.sortedIssues(PeriodChangeSort.PERCENTAGE_POINTS)
+        assertEquals(listOf(noNominal.isin, isin, noAccrued.isin, amortizing.isin, noQuote.isin),
+            byPoints.map { it.bond.isin })
+        assertMoney("-12", byPoints.first().percentagePoints)
+        assertNull(byPoints.last().percentagePoints)
+        val byRubles = period.sortedIssues(PeriodChangeSort.RUBLES)
+        assertEquals(listOf(amortizing.isin, isin, noAccrued.isin, noQuote.isin, noNominal.isin),
+            byRubles.map { it.bond.isin })
+        assertNull(byRubles.last().amount)
         val amortizationOverPeriod = period.issues.single { it.bond == amortizing }
         assertMoney("-160", amortizationOverPeriod.amount)
         assertEquals(listOf(amortization), amortizationOverPeriod.principalEvents)
@@ -516,7 +525,7 @@ class PortfolioTest {
         assertEquals(3, change.comparablePositions)
         assertEquals(listOf(noNominal.isin, isin, noAccrued.isin, amortizing.isin, noQuote.isin),
             change.issues.map { it.bond.isin })
-        assertMoney("-12", change.issues.first().percent)
+        assertMoney("-15", change.issues.first().percent)
         assertNull(change.issues.first().amount)
         assertNull(change.issues.last().percent)
         val amortizingChange = change.issues.single { it.bond == amortizing }

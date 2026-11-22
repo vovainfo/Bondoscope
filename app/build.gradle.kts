@@ -13,8 +13,8 @@ android {
         applicationId = "ru.bondmobile"
         minSdk = 26
         targetSdk = 36
-        versionCode = 19
-        versionName = "1.4.13"
+        versionCode = 20
+        versionName = "1.4.14"
     }
     buildFeatures { compose = true }
     compileOptions {

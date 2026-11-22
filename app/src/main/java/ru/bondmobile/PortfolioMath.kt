@@ -81,13 +81,26 @@ data class PortfolioPriceChange(
 ) {
     val comparablePositions = issues.count { it.amount != null }
     val amount = issues.mapNotNull { it.amount }.takeIf { it.isNotEmpty() }?.sumOf { it }
+
+    internal fun sortedIssues(sort: PeriodChangeSort): List<IssuePriceChange> =
+        issues.sortedByAbsoluteChange(sort.value)
 }
+
+internal enum class PeriodChangeSort(val label: String, val value: (IssuePriceChange) -> BigDecimal?) {
+    PERCENTAGE_POINTS("По п.п.", IssuePriceChange::percentagePoints),
+    RUBLES("По рублям", IssuePriceChange::amount)
+}
+
+private fun List<IssuePriceChange>.sortedByAbsoluteChange(value: (IssuePriceChange) -> BigDecimal?): List<IssuePriceChange> =
+    sortedWith(compareBy<IssuePriceChange, BigDecimal?>(nullsLast(reverseOrder())) { value(it)?.abs() }
+        .thenBy { it.bond.name }.thenBy { it.bond.isin })
 
 data class IssuePriceChange(
     val bond: Bond,
     val previousPrice: BigDecimal?,
     val price: BigDecimal?,
     val percent: BigDecimal?,
+    val percentagePoints: BigDecimal?,
     val previousNominal: BigDecimal?,
     val nominal: BigDecimal?,
     val previousQuantity: Long,
@@ -420,8 +433,11 @@ class PortfolioMath(private val portfolio: Portfolio) {
             val bond = bondFor(isin)
             val old = cleanPosition(bond, before[isin]?.quantity ?: 0, previous.date, start, quoteAt(isin, start))
             val new = cleanPosition(bond, after[isin]?.quantity ?: 0, current.date, end, quoteAt(isin, end))
-            val percent = old.price?.takeIf { it.signum() > 0 && old.quoteDate != new.quoteDate }?.let { base ->
-                new.price?.let { (it - base).movePointRight(2).divide(base, 12, RoundingMode.HALF_UP) }
+            val percentagePoints = old.price?.takeIf { old.quoteDate != new.quoteDate }?.let { base ->
+                new.price?.minus(base)
+            }
+            val percent = old.price?.takeIf { it.signum() > 0 }?.let { base ->
+                percentagePoints?.movePointRight(2)?.divide(base, 12, RoundingMode.HALF_UP)
             }
             val oldAmount = if (subtractNominal) old.premiumAmount else old.cleanAmount
             val newAmount = if (subtractNominal) new.premiumAmount else new.cleanAmount
@@ -429,11 +445,11 @@ class PortfolioMath(private val portfolio: Portfolio) {
             val principal = payments[isin].orEmpty().filter {
                 (it.kind == PaymentKind.AMORTIZATION || it.kind == PaymentKind.PRINCIPAL) && it.date > start && it.date <= end
             }.sortedBy { it.date }
-            IssuePriceChange(bond, old.price, new.price, percent, old.nominal, new.nominal,
+            IssuePriceChange(bond, old.price, new.price, percent, percentagePoints, old.nominal, new.nominal,
                 old.quantity, new.quantity, amount, principal)
-        }.sortedWith(compareBy<IssuePriceChange, BigDecimal?>(nullsLast(reverseOrder())) { it.percent?.abs() }
-            .thenBy { it.bond.name }.thenBy { it.bond.isin })
-        return PortfolioPriceChange(current.date, previous.date, issues)
+        }
+        return PortfolioPriceChange(current.date, previous.date,
+            if (subtractNominal) issues.sortedByAbsoluteChange(IssuePriceChange::percent) else issues)
     }
 
     private fun cleanPosition(bond: Bond, quantity: Long, day: LocalDate, date: String, quote: Quote?): CleanPosition {
