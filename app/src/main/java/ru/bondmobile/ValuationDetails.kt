@@ -17,7 +17,9 @@ import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
+import java.math.RoundingMode
 import java.time.LocalDate
 
 internal fun ValuationIssue.description(): String = when (this) {
@@ -70,6 +72,61 @@ internal fun ResultDetailsDialog(exclusions: List<ResultExclusion>?, day: LocalD
         })
     }
     BreakdownDialog("Подробности финансового результата", day, rows, "Все выпуски вошли в расчёт", close, openBond)
+}
+
+@Composable
+internal fun PremiumChangeDialog(change: PremiumChange, close: () -> Unit, openBond: (String) -> Unit) {
+    AlertDialog(
+        onDismissRequest = close,
+        title = { Text("Изменение по выпускам") },
+        text = {
+            LazyColumn(Modifier.fillMaxWidth().heightIn(max = 420.dp)) {
+                item {
+                    Text("${dateLabel(change.previousDate.toString(), true)} → ${dateLabel(change.date.toString(), true)}",
+                        color = Muted)
+                }
+                items(change.issues, key = { it.bond.isin }) { issue ->
+                    IssuePriceChangeRow(issue) { openBond(issue.bond.isin) }
+                    HorizontalDivider(color = Divider)
+                }
+            }
+        },
+        confirmButton = { TextButton(onClick = close) { Text("Закрыть") } }
+    )
+}
+
+@Composable
+private fun IssuePriceChangeRow(issue: IssuePriceChange, openBond: () -> Unit) {
+    val percent = issue.percent?.setScale(4, RoundingMode.HALF_UP)
+    val before = issue.previousPrice?.let { "${decimalLabel(it.toPlainString())} %" } ?: "—"
+    val after = issue.price?.let { "${decimalLabel(it.toPlainString())} %" } ?: "—"
+    Column(Modifier.fillMaxWidth().clickable(onClick = openBond).padding(vertical = 10.dp),
+        verticalArrangement = Arrangement.spacedBy(4.dp)) {
+        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp),
+            verticalAlignment = Alignment.CenterVertically) {
+            Text(issue.bond.name, Modifier.weight(1f), style = MaterialTheme.typography.titleMedium)
+            Text(percent?.let { "${signedLabel(it) { value -> decimalLabel(value.toPlainString()) }} %" } ?: "—",
+                color = percent?.let { changeColor(it) } ?: Muted, fontWeight = FontWeight.SemiBold)
+            Glyph(Symbol.NEXT, color = Forest)
+        }
+        val prices = if (issue.percent == null && issue.previousPrice?.signum() == 1 && issue.price != null)
+            "Нет новой котировки для расчёта изменения цены" else "Чистая цена · $before → $after"
+        Text(prices, color = Muted, style = MaterialTheme.typography.bodySmall)
+        val amount = issue.amount?.setScale(2, RoundingMode.HALF_UP)
+        Text(amount?.let { "Изменение суммы · ${signedLabel(it, ::rubles)}" } ?: "Недостаточно данных для суммы",
+            color = Muted, style = MaterialTheme.typography.bodySmall)
+        if (issue.previousQuantity != issue.quantity) {
+            Text("Количество · ${issue.previousQuantity} → ${issue.quantity} шт.",
+                color = Muted, style = MaterialTheme.typography.bodySmall)
+        }
+        if (issue.previousNominal != null && issue.nominal != null && issue.previousNominal.compareTo(issue.nominal) != 0) {
+            Text("Номинал · ${rubles(issue.previousNominal)} → ${rubles(issue.nominal)} за бумагу", color = Amber)
+        }
+        issue.principalEvents.forEach { payment ->
+            val status = if (issue.bond.requiresPaymentVerification(payment.date)) " · исполнение не подтверждено" else ""
+            Text("${payment.kind.label} по календарю · ${dateLabel(payment.date, true)}$status", color = Amber)
+        }
+    }
 }
 
 private data class DetailRow(val bond: Bond, val quoteDate: String?, val messages: List<String>)

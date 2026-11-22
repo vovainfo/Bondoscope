@@ -468,33 +468,62 @@ class PortfolioTest {
     }
 
     @Test
-    fun comparesTheLatestQuotedSessionsUsingOnlyComparablePositions() {
-        val incomplete = bond.copy(isin = "RU000A10C5Z7")
+    fun comparesPremiumWithoutAccruedInterestAndSortsByAbsolutePriceChange() {
+        val noAccrued = bond.copy(isin = "RU000A10C5Z7")
+        val amortizing = bond.copy(isin = "RU000A105M59")
+        val noNominal = bond.copy(isin = "RU000A10DZK8")
+        val noQuote = bond.copy(isin = "RU000A10C2L4")
         val unrelated = "RU000A10GDW3"
         val buy = Trade("buy", isin, TradeSide.BUY, 2, "2026-11-02", null, PriceUnit.RUB_WITH_ACCRUED,
             "1000", null, null, "0")
         val friday = Quote(isin, "2026-11-20", "100", "1000", "0")
         val sunday = friday.copy(date = "2026-11-22", cleanPercent = "102")
-        val quotes = listOf(friday, sunday, friday.copy(isin = incomplete.isin),
-            sunday.copy(isin = incomplete.isin, accrued = null), sunday.copy(isin = unrelated, date = "2026-11-23"))
-        val data = Portfolio(listOf(bond, incomplete), listOf(buy, buy.copy(id = "other", isin = incomplete.isin)),
-            quotes = quotes)
+        val quotes = listOf(friday, sunday, friday.copy(isin = noAccrued.isin),
+            sunday.copy(isin = noAccrued.isin, accrued = null),
+            friday.copy(isin = amortizing.isin, cleanPercent = "80"),
+            sunday.copy(isin = amortizing.isin, cleanPercent = "80", nominal = "800"),
+            friday.copy(isin = noNominal.isin, nominal = null),
+            sunday.copy(isin = noNominal.isin, cleanPercent = "88", nominal = null),
+            sunday.copy(isin = unrelated, date = "2026-11-23"))
+        val extra = listOf(noAccrued, amortizing, noNominal, noQuote)
+        val amortization = Payment("amortization", amortizing.isin, PaymentKind.AMORTIZATION, sunday.date, null, "200")
+        val data = Portfolio(bonds = listOf(bond) + extra,
+            trades = listOf(buy) + extra.map { buy.copy(id = it.isin, isin = it.isin, quantity = 1) },
+            payments = listOf(amortization), quotes = quotes)
         val math = PortfolioMath(data)
-        val change = requireNotNull(math.overview(day("2026-11-23")).marketValueChange)
+        val overview = math.overview(day("2026-11-23"))
+        assertMoney("-100", overview.premium.amount)
+        assertEquals(3, overview.premium.valuedPositions)
+        val change = requireNotNull(overview.premiumChange)
         assertEquals(day(friday.date), change.previousDate)
         assertEquals(day(sunday.date), change.date)
-        assertMoney("40", change.amount)
-        assertMoney("2", change.percent)
-        assertEquals(1, change.comparablePositions)
-        assertEquals(2, change.totalPositions)
-        assertNull(math.overview(day("2026-11-20")).marketValueChange)
-        assertNull(math.overview(day("2026-11-30")).marketValueChange)
+        assertMoney("100", change.amount)
+        assertEquals(3, change.comparablePositions)
+        assertEquals(listOf(noNominal.isin, isin, noAccrued.isin, amortizing.isin, noQuote.isin),
+            change.issues.map { it.bond.isin })
+        assertMoney("-12", change.issues.first().percent)
+        assertNull(change.issues.first().amount)
+        assertNull(change.issues.last().percent)
+        val amortizingChange = change.issues.single { it.bond == amortizing }
+        assertMoney("0", amortizingChange.percent)
+        assertMoney("40", amortizingChange.amount)
+        assertMoney("1000", amortizingChange.previousNominal)
+        assertMoney("800", amortizingChange.nominal)
+        assertEquals(listOf(amortization), amortizingChange.principalEvents)
+        val unquotedAmortization = data.copy(quotes = quotes.filterNot { it.isin == amortizing.isin && it.date == sunday.date })
+        val unquotedChange = PortfolioMath(unquotedAmortization).overview(day(sunday.date))
+            .premiumChange?.issues?.single { it.bond == amortizing }
+        assertNull(requireNotNull(unquotedChange).amount)
+        assertNull(unquotedChange.percent)
+        assertEquals(listOf(amortization), unquotedChange.principalEvents)
+        assertNull(math.overview(day("2026-11-20")).premiumChange)
+        assertNull(math.overview(day("2026-11-30")).premiumChange)
 
         val sold = buy.copy(id = "sell", side = TradeSide.SELL, date = sunday.date, price = "1020")
-        val closed = PortfolioMath(Portfolio(listOf(bond), listOf(buy, sold), quotes = listOf(friday, sunday)))
-        val soldChange = requireNotNull(closed.overview(day(sunday.date)).marketValueChange)
-        assertMoney("-2000", soldChange.amount)
-        assertMoney("-100", soldChange.percent)
+        val closed = PortfolioMath(Portfolio(listOf(bond), listOf(buy, sold), quotes = listOf(friday.copy(cleanPercent = "99"), sunday)))
+        val soldChange = requireNotNull(closed.overview(day(sunday.date)).premiumChange)
+        assertMoney("20", soldChange.amount)
+        assertEquals(0L, soldChange.issues.single().quantity)
     }
 
     @Test

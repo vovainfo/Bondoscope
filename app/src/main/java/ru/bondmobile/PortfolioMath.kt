@@ -65,17 +65,39 @@ data class Overview(
     val receivedCoupons: BigDecimal,
     val receivedPrincipal: BigDecimal,
     val payoutsIncomplete: Boolean,
-    val marketValueChange: MarketValueChange? = null
+    val premium: PremiumValue,
+    val premiumChange: PremiumChange?
 )
 
-data class MarketValueChange(
+data class PremiumValue(val amount: BigDecimal?, val valuedPositions: Int)
+
+data class PremiumChange(
     val date: LocalDate,
     val previousDate: LocalDate,
-    val amount: BigDecimal,
+    val issues: List<IssuePriceChange>
+) {
+    val comparablePositions = issues.count { it.amount != null }
+    val amount = issues.mapNotNull { it.amount }.takeIf { it.isNotEmpty() }?.sumOf { it }
+}
+
+data class IssuePriceChange(
+    val bond: Bond,
+    val previousPrice: BigDecimal?,
+    val price: BigDecimal?,
     val percent: BigDecimal?,
-    val comparablePositions: Int,
-    val totalPositions: Int
+    val previousNominal: BigDecimal?,
+    val nominal: BigDecimal?,
+    val previousQuantity: Long,
+    val quantity: Long,
+    val amount: BigDecimal?,
+    val principalEvents: List<Payment>
 )
+
+private data class PremiumPosition(val price: BigDecimal?, val nominal: BigDecimal?, val quantity: Long, val quoteDate: String?) {
+    val amount: BigDecimal?
+        get() = if (quantity == 0L) BigDecimal.ZERO else if (price == null || nominal == null) null
+        else (price.movePointLeft(2) - BigDecimal.ONE) * nominal * quantity.toBigDecimal()
+}
 
 internal data class ResultExclusion(
     val bond: Bond,
@@ -344,33 +366,54 @@ class PortfolioMath(private val portfolio: Portfolio) {
             totals.coupons,
             totals.principal,
             totals.incomplete,
+            premiumValue(holdings, date),
             if (sessions.size == 2 && ChronoUnit.DAYS.between(sessions.last().date, today) <= MAX_QUOTE_AGE_DAYS)
-                marketValueChange(sessions.first(), sessions.last()) else null
+                premiumChange(sessions.first(), sessions.last()) else null
         )
     }
 
-    private fun marketValueChange(previous: SessionValuation, current: SessionValuation): MarketValueChange? {
+    private fun premiumValue(holdings: List<Holding>, date: String): PremiumValue {
+        val values = holdings.mapNotNull { premiumPosition(it.bond, it.quantity, date).amount }
+        val amount = values.sumOf { it }.takeIf { values.isNotEmpty() || holdings.isEmpty() }
+        return PremiumValue(amount, values.size)
+    }
+
+    private fun premiumChange(previous: SessionValuation, current: SessionValuation): PremiumChange? {
         val before = previous.holdings.associateBy { it.bond.isin }
         val after = current.holdings.associateBy { it.bond.isin }
-        val issues = before.keys + after.keys
-        var comparable = 0
-        var previousValue = BigDecimal.ZERO
-        var currentValue = BigDecimal.ZERO
-        for (isin in issues) {
-            val old = before[isin]
-            val new = after[isin]
-            val oldValue = if (old == null) BigDecimal.ZERO else old.value ?: continue
-            val newValue = if (new == null) BigDecimal.ZERO else new.value ?: continue
-            previousValue += oldValue
-            currentValue += newValue
-            comparable++
+        val start = previous.date.toString()
+        val end = current.date.toString()
+        val issues = (before.keys + after.keys).map { isin ->
+            val bond = bondFor(isin)
+            val old = premiumPosition(bond, before[isin]?.quantity ?: 0, start)
+            val new = premiumPosition(bond, after[isin]?.quantity ?: 0, end)
+            val percent = old.price?.takeIf { it.signum() > 0 && old.quoteDate != new.quoteDate }?.let { base ->
+                new.price?.let { (it - base).movePointRight(2).divide(base, 12, RoundingMode.HALF_UP) }
+            }
+            val oldAmount = old.amount
+            val newAmount = new.amount
+            val amount = if (oldAmount != null && newAmount != null) newAmount - oldAmount else null
+            val principal = payments[isin].orEmpty().filter {
+                (it.kind == PaymentKind.AMORTIZATION || it.kind == PaymentKind.PRINCIPAL) && it.date > start && it.date <= end
+            }.sortedBy { it.date }
+            IssuePriceChange(bond, old.price, new.price, percent, old.nominal, new.nominal,
+                old.quantity, new.quantity, amount, principal)
+        }.sortedWith(compareBy<IssuePriceChange, BigDecimal?>(nullsLast(reverseOrder())) { it.percent?.abs() }
+            .thenBy { it.bond.name }.thenBy { it.bond.isin })
+        return issues.takeIf { it.isNotEmpty() }?.let { PremiumChange(current.date, previous.date, it) }
+    }
+
+    private fun premiumPosition(bond: Bond, quantity: Long, date: String): PremiumPosition {
+        val nominal = remainingNominal(bond, date)
+        val validQuote = quoteAt(bond.isin, date)?.takeIf { quote ->
+            ChronoUnit.DAYS.between(LocalDate.parse(quote.date), LocalDate.parse(date)) <= MAX_QUOTE_AGE_DAYS &&
+                (bond.maturity == null || date < bond.maturity) &&
+                payments[bond.isin].orEmpty().none { payment ->
+                    payment.kind != PaymentKind.COUPON && payment.date <= date &&
+                        (payment.kind == PaymentKind.REDEMPTION || payment.date > quote.date)
+                } && (quote.nominal == null || nominal == null || quote.nominal.toBigDecimal().compareTo(nominal) == 0)
         }
-        if (comparable == 0) return null
-        val change = currentValue - previousValue
-        val percent = previousValue.takeIf { it.signum() > 0 }?.let {
-            change.movePointRight(2).divide(it, 2, RoundingMode.HALF_UP)
-        }
-        return MarketValueChange(current.date, previous.date, change, percent, comparable, issues.size)
+        return PremiumPosition(validQuote?.cleanPercent?.toBigDecimal(), nominal, quantity, validQuote?.date)
     }
 
     private fun Trade.signedQuantity(): Long = if (side == TradeSide.BUY) quantity.toLong() else -quantity.toLong()

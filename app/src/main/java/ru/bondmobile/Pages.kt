@@ -56,7 +56,7 @@ import java.time.LocalDate
 
 private fun Quote?.pricePercentLabel(): String = this?.cleanPercent?.let { "${decimalLabel(it)} %" } ?: "—"
 
-private fun signedLabel(number: BigDecimal, format: (BigDecimal) -> String): String {
+internal fun signedLabel(number: BigDecimal, format: (BigDecimal) -> String): String {
     val prefix = when (number.signum()) {
         1 -> "+"
         -1 -> "−"
@@ -65,7 +65,7 @@ private fun signedLabel(number: BigDecimal, format: (BigDecimal) -> String): Str
     return prefix + format(number.abs())
 }
 
-private fun changeColor(number: BigDecimal, darkBackground: Boolean = false): Color = when (number.signum()) {
+internal fun changeColor(number: BigDecimal, darkBackground: Boolean = false): Color = when (number.signum()) {
     1 -> if (darkBackground) Color(0xFFA8F5C2) else Color(0xFF176640)
     -1 -> if (darkBackground) Color(0xFFFFB7B2) else Rust
     else -> if (darkBackground) Mint else Muted
@@ -78,17 +78,20 @@ private fun DetailLink(label: String, color: Color, onClick: () -> Unit) {
 }
 
 @Composable
-private fun MarketChangeLabel(change: MarketValueChange) {
-    val amount = change.amount.setScale(2, RoundingMode.HALF_UP)
-    val difference = signedLabel(amount, ::rubles)
-    val percent = change.percent?.let { value -> " (${signedLabel(value) { decimalLabel(it.toPlainString()) }} %)" }.orEmpty()
+private fun PremiumChangeLabel(change: PremiumChange, onClick: () -> Unit) {
+    val amount = change.amount?.setScale(2, RoundingMode.HALF_UP)
+    val difference = amount?.let { signedLabel(it, ::rubles) } ?: "—"
     Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
-        Text(difference + percent, color = changeColor(amount, darkBackground = true),
-            style = MaterialTheme.typography.titleMedium)
+        Row(Modifier.clickable(role = Role.Button, onClick = onClick),
+            horizontalArrangement = Arrangement.spacedBy(4.dp), verticalAlignment = Alignment.CenterVertically) {
+            Text(difference, color = amount?.let { changeColor(it, darkBackground = true) } ?: Mint,
+                style = MaterialTheme.typography.titleMedium, textDecoration = TextDecoration.Underline)
+            Glyph(Symbol.NEXT, color = Mint)
+        }
         Text("На ${dateLabel(change.date.toString(), true)} к ${dateLabel(change.previousDate.toString(), true)}",
             color = Mint, style = MaterialTheme.typography.bodySmall)
-        if (change.comparablePositions < change.totalPositions) {
-            Text("Сравнение по ${change.comparablePositions} из ${change.totalPositions} позиций",
+        if (change.comparablePositions < change.issues.size) {
+            Text("Сравнение по ${change.comparablePositions} из ${change.issues.size} позиций",
                 color = Mint, style = MaterialTheme.typography.bodySmall)
         }
     }
@@ -115,6 +118,7 @@ internal fun PortfolioPage(data: Dashboard, busy: Boolean, refresh: () -> Unit, 
     val defaultCount = holdings.count { it.bond.defaultStatus != null }
     var detailsDate by rememberSaveable(data.selectedAccount?.id) { mutableStateOf<String?>(null) }
     var resultDetails by rememberSaveable(data.selectedAccount?.id) { mutableStateOf(false) }
+    var showPremiumChanges by rememberSaveable(data.selectedAccount?.id) { mutableStateOf(false) }
     fun openDetails(day: LocalDate, forResult: Boolean) {
         resultDetails = forResult
         detailsDate = day.toString()
@@ -134,7 +138,17 @@ internal fun PortfolioPage(data: Dashboard, busy: Boolean, refresh: () -> Unit, 
                 Text("Рыночная стоимость", color = Mint, style = MaterialTheme.typography.titleMedium)
                 val amount = if (now != null) now.value else BigDecimal.ZERO
                 Text(rubles(amount), color = Color.White, fontSize = 35.sp, lineHeight = 42.sp, fontWeight = FontWeight.Bold)
-                total.marketValueChange?.let { MarketChangeLabel(it) }
+                if (now != null) {
+                    Column(verticalArrangement = Arrangement.spacedBy(3.dp)) {
+                        Text("Отклонение от номинала без НКД", color = Mint, style = MaterialTheme.typography.bodySmall)
+                        Text(rubles(total.premium.amount), color = Color.White, style = MaterialTheme.typography.titleMedium)
+                        if (total.premium.valuedPositions < holdings.size) {
+                            Text("Оценено ${total.premium.valuedPositions} из ${holdings.size} позиций",
+                                color = Mint, style = MaterialTheme.typography.bodySmall)
+                        }
+                        total.premiumChange?.let { PremiumChangeLabel(it) { showPremiumChanges = true } }
+                    }
+                }
                 if (unavailable.isNotEmpty()) {
                     Text("Оценка неполная · ${unavailable.size} из ${holdings.size} позиций без оценки", color = Mint)
                 }
@@ -239,6 +253,14 @@ internal fun PortfolioPage(data: Dashboard, busy: Boolean, refresh: () -> Unit, 
                     } ?: if (calendarDate == 0L) "Календарь ещё не загружен" else "В загруженном календаре ближайших выплат нет", color = Muted)
                     TextButton(onClick = openPayments) { Text("Открыть выплаты") }
                 }
+            }
+        }
+    }
+    if (showPremiumChanges) {
+        total.premiumChange?.let { change ->
+            PremiumChangeDialog(change, { showPremiumChanges = false }) { isin ->
+                showPremiumChanges = false
+                openBond(isin)
             }
         }
     }
