@@ -71,6 +71,20 @@ data class PaymentEstimate(val units: Long?, val amount: BigDecimal?)
 
 internal data class QuoteChange(val previousDate: String, val percentagePoints: BigDecimal)
 
+internal enum class IssuePaymentPeriod(val label: String) {
+    PLANNED("Планируемые"), PAST("Прошедшие")
+}
+
+internal enum class IssuePaymentType(val label: String) {
+    ALL("Все"), COUPONS("Купоны"), PRINCIPAL("Амортизация и погашение");
+
+    fun includes(kind: PaymentKind): Boolean = when (this) {
+        ALL -> true
+        COUPONS -> kind == PaymentKind.COUPON
+        PRINCIPAL -> kind != PaymentKind.COUPON
+    }
+}
+
 data class MonthlyReceipt(
     val coupons: BigDecimal = BigDecimal.ZERO,
     val principal: BigDecimal = BigDecimal.ZERO,
@@ -119,9 +133,17 @@ class PortfolioMath(private val portfolio: Portfolio) {
         return QuoteChange(previous.date, price - requireNotNull(previous.cleanPercent).toBigDecimal())
     }
 
-    internal fun issuePayments(isin: String, today: String): List<Payment> {
-        val (planned, elapsed) = candidates.filter { it.isin == isin }.partition { it.date > today }
-        return planned.sortedBy { it.date } + elapsed.sortedByDescending { it.date }
+    internal fun issuePayments(isin: String, today: String, period: IssuePaymentPeriod, type: IssuePaymentType): List<Payment> {
+        val payments = candidates.filter { payment ->
+            payment.isin == isin && type.includes(payment.kind) && when (period) {
+                IssuePaymentPeriod.PLANNED -> payment.date > today
+                IssuePaymentPeriod.PAST -> payment.date <= today
+            }
+        }
+        return when (period) {
+            IssuePaymentPeriod.PLANNED -> payments.sortedBy { it.date }
+            IssuePaymentPeriod.PAST -> payments.sortedByDescending { it.date }
+        }
     }
 
     fun maturityDate(bond: Bond): String? = bond.maturity ?: payments[bond.isin]?.redemptionDate()

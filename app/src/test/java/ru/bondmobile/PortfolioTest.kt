@@ -372,14 +372,26 @@ class PortfolioTest {
     }
 
     @Test
-    fun listsPlannedIssuePaymentsFromNearestToFarthestAndKeepsHistoryRecentFirst() {
+    fun filtersIssuePaymentsByPeriodAndTypeAndKeepsUnverifiedPastPayments() {
         val buy = Trade("buy", isin, TradeSide.BUY, 1, "2026-10-01", null, PriceUnit.RUB_WITH_ACCRUED,
             "1000", null, null, "0")
-        val payments = listOf("2027-01-10", "2026-11-10", "2026-12-10", "2026-10-10")
-            .map { date -> Payment(date, isin, PaymentKind.COUPON, date, null, "10") }
-        val math = PortfolioMath(Portfolio(listOf(bond), listOf(buy), payments))
-        assertEquals(listOf("2026-12-10", "2027-01-10", "2026-11-10", "2026-10-10"),
-            math.issuePayments(isin, "2026-11-21").map { it.date })
+        val today = "2026-11-21"
+        val redemption = Payment("redemption", isin, PaymentKind.REDEMPTION, "2027-01-10", null, "900")
+        val pastCoupon = Payment("pastCoupon", isin, PaymentKind.COUPON, "2026-11-10", null, "10")
+        val payoutToday = Payment("today", isin, PaymentKind.PRINCIPAL, today, null, "40")
+        val futureCoupon = pastCoupon.copy(id = "futureCoupon", date = "2026-12-10")
+        val amortization = Payment("amortization", isin, PaymentKind.AMORTIZATION, "2026-10-10", null, "60")
+        val payments = listOf(redemption, pastCoupon, payoutToday, futureCoupon, amortization)
+        val math = PortfolioMath(Portfolio(listOf(bond.copy(defaultStatus = BondDefaultStatus.DEFAULT)), listOf(buy), payments))
+        val planned = IssuePaymentPeriod.PLANNED
+        val past = IssuePaymentPeriod.PAST
+        assertEquals(listOf(futureCoupon, redemption), math.issuePayments(isin, today, planned, IssuePaymentType.ALL))
+        assertEquals(listOf(payoutToday, pastCoupon, amortization), math.issuePayments(isin, today, past, IssuePaymentType.ALL))
+        assertEquals(listOf(futureCoupon), math.issuePayments(isin, today, planned, IssuePaymentType.COUPONS))
+        assertEquals(listOf(pastCoupon), math.issuePayments(isin, today, past, IssuePaymentType.COUPONS))
+        assertEquals(listOf(redemption), math.issuePayments(isin, today, planned, IssuePaymentType.PRINCIPAL))
+        assertEquals(listOf(payoutToday, amortization), math.issuePayments(isin, today, past, IssuePaymentType.PRINCIPAL))
+        assertEquals(PaymentStatus.UNVERIFIED, math.paymentStatus(payoutToday, today))
     }
 
     @Test

@@ -8,6 +8,8 @@ import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
+import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -20,9 +22,12 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Button
+import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
+import androidx.compose.material3.SecondaryTabRow
+import androidx.compose.material3.Tab
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -394,7 +399,13 @@ fun BondDetails(data: Dashboard, bond: Bond, busy: Boolean, back: () -> Unit, re
     val recent = data.portfolio.quotes.filter { it.isin == bond.isin }.maxByOrNull { it.date }
     val priceQuotes = remember(data, bond.isin) { data.math.priceQuotes(bond.isin) }
     val trades = data.portfolio.trades.filter { it.isin == bond.isin }.sortedByDescending { it.date }
-    val payouts = remember(data, bond.isin) { data.math.issuePayments(bond.isin, today) }
+    var period by rememberSaveable(bond.isin) { mutableStateOf(IssuePaymentPeriod.PLANNED) }
+    var plannedType by rememberSaveable(bond.isin) { mutableStateOf(IssuePaymentType.ALL) }
+    var pastType by rememberSaveable(bond.isin) { mutableStateOf(IssuePaymentType.ALL) }
+    val type = if (period == IssuePaymentPeriod.PLANNED) plannedType else pastType
+    val payouts = remember(data, bond.isin, period, type) {
+        data.math.issuePayments(bond.isin, today, period, type)
+    }
     val offerDate = bond.upcomingOfferDate(today)
     PageList {
         item { PageHeader(bond.name, "${bond.secid} · ${bond.isin}", busy, refresh, back) }
@@ -435,8 +446,45 @@ fun BondDetails(data: Dashboard, bond: Bond, busy: Boolean, back: () -> Unit, re
         item { SectionTitle("Сделки") }
         items(trades, key = { it.id }) { item -> TradeRow(data, item) { edit(item) } }
         item { SectionTitle("Выплаты по выпуску") }
-        if (payouts.isEmpty()) item { Sheet { Text("Данные о выплатах пока отсутствуют", color = Muted) } }
+        item(key = "issue-payment-controls") {
+            IssuePaymentControls(period, type, { period = it }) {
+                if (period == IssuePaymentPeriod.PLANNED) plannedType = it else pastType = it
+            }
+        }
+        if (payouts.isEmpty()) item {
+            val message = when {
+                bond.calendarUpdatedAt == 0L && data.payments.none { it.isin == bond.isin } -> "Календарь выплат ещё не загружен"
+                type != IssuePaymentType.ALL -> "Выплат этого типа за выбранный период нет"
+                period == IssuePaymentPeriod.PLANNED -> "Планируемых выплат пока нет"
+                else -> "Прошедших выплат пока нет"
+            }
+            Sheet { Text(message, color = Muted) }
+        }
         items(payouts, key = { it.id }) { item -> PaymentRow(data, item) }
+    }
+}
+
+@OptIn(ExperimentalMaterial3Api::class, ExperimentalLayoutApi::class)
+@Composable
+private fun IssuePaymentControls(
+    period: IssuePaymentPeriod,
+    type: IssuePaymentType,
+    selectPeriod: (IssuePaymentPeriod) -> Unit,
+    selectType: (IssuePaymentType) -> Unit
+) {
+    Sheet {
+        SecondaryTabRow(selectedTabIndex = period.ordinal, containerColor = CardWhite) {
+            IssuePaymentPeriod.entries.forEach { option ->
+                Tab(selected = period == option, onClick = { selectPeriod(option) },
+                    text = { Text(option.label) })
+            }
+        }
+        FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+            IssuePaymentType.entries.forEach { option ->
+                FilterChip(selected = type == option, onClick = { selectType(option) },
+                    label = { Text(option.label) })
+            }
+        }
     }
 }
 
