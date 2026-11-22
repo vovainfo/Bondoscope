@@ -32,7 +32,7 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
 
-      - name: Check release ref
+      - name: Check release ref and description
         env:
           EVENT: ${{ github.event_name }}
           REF_NAME: ${{ github.ref_name }}
@@ -51,6 +51,13 @@ jobs:
               echo 'The release tag must point to a commit on main' >&2
               exit 1
             }
+            notes=".github/release-notes/$REF_NAME.md"
+            if [[ ! -f "$notes" ]] || ! grep -q '[^[:space:]]' "$notes"; then
+              echo "Add a non-empty release description at $notes before tagging this commit" >&2
+              exit 1
+            fi
+            mkdir -p "$RUNNER_TEMP/bondoscope-release"
+            cp -- "$notes" "$RUNNER_TEMP/bondoscope-release/release-notes.md"
           fi
           echo "RELEASE_VERSION=$version" >> "$GITHUB_ENV"
 
@@ -75,7 +82,7 @@ jobs:
           APK_KEYSTORE_PASSWORD: ${{ secrets.APK_KEYSTORE_PASSWORD }}
         run: bash .github/scripts/package-apk.sh
 
-      - name: Upload signed APK and manifest
+      - name: Upload release bundle
         id: bundle
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
@@ -83,6 +90,7 @@ jobs:
           path: |
             ${{ runner.temp }}/bondoscope-release/*.apk
             ${{ runner.temp }}/bondoscope-release/bondoscope-update.json
+            ${{ runner.temp }}/bondoscope-release/*.md
           if-no-files-found: error
           retention-days: 7
 
@@ -109,13 +117,18 @@ jobs:
         run: |
           apk="release/Bondoscope-${TAG#v}.apk"
           manifest="release/bondoscope-update.json"
+          notes="release/release-notes.md"
           files=("$apk" "$manifest")
           for file in "${files[@]}"; do
             test -s "$file"
           done
+          if [[ ! -f "$notes" ]] || ! grep -q '[^[:space:]]' "$notes"; then
+            echo 'Release bundle has no description' >&2
+            exit 1
+          fi
 
           if ! gh release view "$TAG" >/dev/null 2>&1; then
-            gh release create "$TAG" --verify-tag --draft --title "Бондоскоп ${TAG#v}" --generate-notes
+            gh release create "$TAG" --verify-tag --draft --title "Бондоскоп ${TAG#v}" --notes-file "$notes"
           fi
           draft=$(gh release view "$TAG" --json isDraft --jq '.isDraft')
           for file in "${files[@]}"; do
@@ -134,6 +147,9 @@ jobs:
             fi
           done
           if [[ "$draft" == true ]]; then
-            gh release edit "$TAG" --draft=false --latest
+            gh release edit "$TAG" --notes-file "$notes" --draft=false --latest
           fi
-          gh release view "$TAG" --json isDraft,url --jq 'if .isDraft then error("Release is still a draft") else .url end'
+          gh release view "$TAG" --json isDraft,body,url --jq '
+            if .isDraft then error("Release is still a draft")
+            elif ((.body // "") | test("[^[:space:]]") | not) then error("Release has no description")
+            else .url end'
