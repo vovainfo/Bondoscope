@@ -33,6 +33,7 @@ import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
@@ -40,15 +41,58 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextDecoration
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.core.net.toUri
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 import java.math.BigDecimal
+import java.math.RoundingMode
 import java.time.LocalDate
 
 private fun Quote?.pricePercentLabel(): String = this?.cleanPercent?.let { "${decimalLabel(it)} %" } ?: "—"
+
+private fun signedLabel(number: BigDecimal, format: (BigDecimal) -> String): String {
+    val prefix = when (number.signum()) {
+        1 -> "+"
+        -1 -> "−"
+        else -> ""
+    }
+    return prefix + format(number.abs())
+}
+
+private fun changeColor(number: BigDecimal, darkBackground: Boolean = false): Color = when (number.signum()) {
+    1 -> if (darkBackground) Color(0xFFA8F5C2) else Color(0xFF176640)
+    -1 -> if (darkBackground) Color(0xFFFFB7B2) else Rust
+    else -> if (darkBackground) Mint else Muted
+}
+
+@Composable
+private fun DetailLink(label: String, color: Color, onClick: () -> Unit) {
+    Text(label, Modifier.clickable(role = Role.Button, onClick = onClick),
+        color = color, style = MaterialTheme.typography.bodySmall, textDecoration = TextDecoration.Underline)
+}
+
+@Composable
+private fun MarketChangeLabel(change: MarketValueChange) {
+    val amount = change.amount.setScale(2, RoundingMode.HALF_UP)
+    val difference = signedLabel(amount, ::rubles)
+    val percent = change.percent?.let { value -> " (${signedLabel(value) { decimalLabel(it.toPlainString()) }} %)" }.orEmpty()
+    Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
+        Text(difference + percent, color = changeColor(amount, darkBackground = true),
+            style = MaterialTheme.typography.titleMedium)
+        Text("На ${dateLabel(change.date.toString(), true)} к ${dateLabel(change.previousDate.toString(), true)}",
+            color = Mint, style = MaterialTheme.typography.bodySmall)
+        if (change.comparablePositions < change.totalPositions) {
+            Text("Сравнение по ${change.comparablePositions} из ${change.totalPositions} позиций",
+                color = Mint, style = MaterialTheme.typography.bodySmall)
+        }
+    }
+}
 
 @Composable
 internal fun PageList(content: LazyListScope.() -> Unit) {
@@ -69,7 +113,12 @@ internal fun PortfolioPage(data: Dashboard, busy: Boolean, refresh: () -> Unit, 
     val unavailable = holdings.filter { it.issue != null }
     val estimatedCount = holdings.count { it.estimatedAccrued != null }
     val defaultCount = holdings.count { it.bond.defaultStatus != null }
-    var showValuationDetails by rememberSaveable(data.selectedAccount?.id) { mutableStateOf(false) }
+    var detailsDate by rememberSaveable(data.selectedAccount?.id) { mutableStateOf<String?>(null) }
+    var resultDetails by rememberSaveable(data.selectedAccount?.id) { mutableStateOf(false) }
+    fun openDetails(day: LocalDate, forResult: Boolean) {
+        resultDetails = forResult
+        detailsDate = day.toString()
+    }
     val trackedBonds = data.portfolio.trades.map { it.isin }.toSet()
     val closedBonds = data.portfolio.bonds.filter { it.isin in trackedBonds && holdings.none { h -> h.bond.isin == it.isin } }
     val calendarDate = data.portfolio.bonds.filter { it.isin in trackedBonds }.minOfOrNull { it.calendarUpdatedAt } ?: 0
@@ -85,6 +134,7 @@ internal fun PortfolioPage(data: Dashboard, busy: Boolean, refresh: () -> Unit, 
                 Text("Рыночная стоимость", color = Mint, style = MaterialTheme.typography.titleMedium)
                 val amount = if (now != null) now.value else BigDecimal.ZERO
                 Text(rubles(amount), color = Color.White, fontSize = 35.sp, lineHeight = 42.sp, fontWeight = FontWeight.Bold)
+                total.marketValueChange?.let { MarketChangeLabel(it) }
                 if (unavailable.isNotEmpty()) {
                     Text("Оценка неполная · ${unavailable.size} из ${holdings.size} позиций без оценки", color = Mint)
                 }
@@ -95,7 +145,7 @@ internal fun PortfolioPage(data: Dashboard, busy: Boolean, refresh: () -> Unit, 
                     Text("Выпуски с признаками дефолта · $defaultCount", color = Mint)
                 }
                 if (unavailable.isNotEmpty() || estimatedCount > 0) {
-                    TextButton(onClick = { showValuationDetails = true }) {
+                    TextButton(onClick = { openDetails(data.today, false) }) {
                         Text("Подробности оценки", color = Color.White)
                         Glyph(Symbol.NEXT, color = Color.White)
                     }
@@ -105,8 +155,9 @@ internal fun PortfolioPage(data: Dashboard, busy: Boolean, refresh: () -> Unit, 
                         Text("Финансовый результат", color = Mint, style = MaterialTheme.typography.bodySmall)
                         Text(rubles(now?.result), color = Color.White, style = MaterialTheme.typography.titleMedium)
                         if (now?.resultIsPartial == true) {
-                            Text("Частичный · ${now.issuesWithResult} из ${now.issuesTracked} выпусков",
-                                color = Mint, style = MaterialTheme.typography.bodySmall)
+                            DetailLink("Частичный · ${now.issuesWithResult} из ${now.issuesTracked} выпусков", Mint) {
+                                openDetails(now.date, true)
+                            }
                         }
                     }
                     Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(3.dp)) {
@@ -120,7 +171,7 @@ internal fun PortfolioPage(data: Dashboard, busy: Boolean, refresh: () -> Unit, 
             EmptyCard(Symbol.PLUS, "Добавьте первую покупку", "Найдите облигацию по тикеру или ISIN и внесите данные сделки.",
                 "Добавить покупку", add)
         } else {
-            item { HistoryChart(total.points) }
+            item { HistoryChart(total.points, ::openDetails) }
             item {
                 Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
                     Box(Modifier.weight(1f)) { SectionTitle("Позиции") }
@@ -144,7 +195,16 @@ internal fun PortfolioPage(data: Dashboard, busy: Boolean, refresh: () -> Unit, 
                             Text(h.bond.name, style = MaterialTheme.typography.titleMedium)
                             Text("${h.bond.secid} · ${h.quantity} шт.", color = Muted, style = MaterialTheme.typography.bodySmall)
                         }
-                        Text(h.quote.pricePercentLabel(), fontWeight = FontWeight.SemiBold, maxLines = 1)
+                        Column(horizontalAlignment = Alignment.End, verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                            Text(h.quote.pricePercentLabel(), fontWeight = FontWeight.SemiBold, maxLines = 1)
+                            change?.let {
+                                val value = signedLabel(it.percentagePoints) { amount -> decimalLabel(amount.toPlainString()) }
+                                Text("$value п.п.", color = changeColor(it.percentagePoints),
+                                    style = MaterialTheme.typography.bodySmall, fontWeight = FontWeight.SemiBold)
+                                Text("к ${dateLabel(it.previousDate, short = true)}", color = Muted,
+                                    style = MaterialTheme.typography.bodySmall)
+                            }
+                        }
                         Glyph(Symbol.NEXT, color = Forest)
                     }
                     Text("Номинал · ${nominal?.let { "${rubles(it)} / шт." } ?: "—"}",
@@ -154,18 +214,6 @@ internal fun PortfolioPage(data: Dashboard, busy: Boolean, refresh: () -> Unit, 
                         val label = if (h.estimatedAccrued != null) "Расчётная оценка по котировке от" else "Котировка от"
                         Text("$label ${dateLabel(it, short = true)}",
                             color = if (h.estimatedAccrued != null) Amber else Muted, style = MaterialTheme.typography.bodySmall)
-                    }
-                    change?.let {
-                        val sign = it.percentagePoints.signum()
-                        val prefix = when {
-                            sign > 0 -> "+"
-                            sign < 0 -> "−"
-                            else -> ""
-                        }
-                        val number = decimalLabel(it.percentagePoints.abs().toPlainString())
-                        Text("$prefix$number п.п. к ${dateLabel(it.previousDate, short = true)}",
-                            color = if (sign > 0) Forest else if (sign < 0) Rust else Muted,
-                            style = MaterialTheme.typography.bodySmall)
                     }
                     h.bond.defaultStatus?.let { Text(it.label, color = Amber, style = MaterialTheme.typography.bodySmall) }
                     h.issue?.let { Text(it.description(), color = Amber, style = MaterialTheme.typography.bodySmall) }
@@ -194,17 +242,35 @@ internal fun PortfolioPage(data: Dashboard, busy: Boolean, refresh: () -> Unit, 
             }
         }
     }
-    if (showValuationDetails) {
-        ValuationDetailsDialog(holdings.filter { it.issue != null || it.estimatedAccrued != null },
-            { showValuationDetails = false }) { isin ->
-            showValuationDetails = false
+    detailsDate?.let { date ->
+        val day = LocalDate.parse(date)
+        val dismiss = { detailsDate = null }
+        val showBond: (String) -> Unit = { isin ->
+            dismiss()
             openBond(isin)
+        }
+        if (resultDetails) {
+            val exclusions by produceState<List<ResultExclusion>?>(null, data, day) {
+                value = null
+                value = withContext(Dispatchers.Default) {
+                    data.math.resultExclusions(day, total.holdings.takeIf { day == data.today })
+                }
+            }
+            ResultDetailsDialog(exclusions, day, dismiss, showBond)
+        } else {
+            val details by produceState<List<Holding>?>(null, data, day) {
+                value = withContext(Dispatchers.Default) {
+                    val positions = if (day == data.today) total.holdings else data.math.holdingsAt(day)
+                    positions.filter { it.issue != null || it.estimatedAccrued != null }
+                }
+            }
+            ValuationDetailsDialog(details, day.takeUnless { it == data.today }, dismiss, showBond)
         }
     }
 }
 
 @Composable
-private fun HistoryChart(points: List<PortfolioPoint>) {
+private fun HistoryChart(points: List<PortfolioPoint>, openDetails: (LocalDate, Boolean) -> Unit) {
     var showResult by rememberSaveable { mutableStateOf(false) }
     var range by rememberSaveable { mutableStateOf(90) }
     var selected by remember(points, range, showResult) { mutableStateOf<Int?>(null) }
@@ -233,12 +299,14 @@ private fun HistoryChart(points: List<PortfolioPoint>) {
             Text("${dateLabel(selectedPoint?.date?.toString(), short = true)}  ·  ${rubles(amount)}",
                 style = MaterialTheme.typography.titleMedium)
             if (showResult && selectedPoint?.resultIsPartial == true) {
-                Text("Частичный результат · ${selectedPoint.issuesWithResult} из ${selectedPoint.issuesTracked} выпусков",
-                    color = Amber, style = MaterialTheme.typography.bodySmall)
+                DetailLink("Частичный результат · ${selectedPoint.issuesWithResult} из ${selectedPoint.issuesTracked} выпусков", Amber) {
+                    openDetails(selectedPoint.date, true)
+                }
             }
             if (!showResult && selectedPoint?.valueIsPartial == true) {
-                Text("Частичная стоимость · ${selectedPoint.positionsWithValue} из ${selectedPoint.openPositions} позиций",
-                    color = Amber, style = MaterialTheme.typography.bodySmall)
+                DetailLink("Частичная стоимость · ${selectedPoint.positionsWithValue} из ${selectedPoint.openPositions} позиций", Amber) {
+                    openDetails(selectedPoint.date, false)
+                }
             }
             val selectedUsesEstimate = if (showResult) selectedPoint?.resultUsesEstimatedValuation
                 else selectedPoint?.usesEstimatedValuation

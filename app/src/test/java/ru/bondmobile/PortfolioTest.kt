@@ -468,6 +468,36 @@ class PortfolioTest {
     }
 
     @Test
+    fun comparesTheLatestQuotedSessionsUsingOnlyComparablePositions() {
+        val incomplete = bond.copy(isin = "RU000A10C5Z7")
+        val unrelated = "RU000A10GDW3"
+        val buy = Trade("buy", isin, TradeSide.BUY, 2, "2026-11-02", null, PriceUnit.RUB_WITH_ACCRUED,
+            "1000", null, null, "0")
+        val friday = Quote(isin, "2026-11-20", "100", "1000", "0")
+        val sunday = friday.copy(date = "2026-11-22", cleanPercent = "102")
+        val quotes = listOf(friday, sunday, friday.copy(isin = incomplete.isin),
+            sunday.copy(isin = incomplete.isin, accrued = null), sunday.copy(isin = unrelated, date = "2026-11-23"))
+        val data = Portfolio(listOf(bond, incomplete), listOf(buy, buy.copy(id = "other", isin = incomplete.isin)),
+            quotes = quotes)
+        val math = PortfolioMath(data)
+        val change = requireNotNull(math.overview(day("2026-11-23")).marketValueChange)
+        assertEquals(day(friday.date), change.previousDate)
+        assertEquals(day(sunday.date), change.date)
+        assertMoney("40", change.amount)
+        assertMoney("2", change.percent)
+        assertEquals(1, change.comparablePositions)
+        assertEquals(2, change.totalPositions)
+        assertNull(math.overview(day("2026-11-20")).marketValueChange)
+        assertNull(math.overview(day("2026-11-30")).marketValueChange)
+
+        val sold = buy.copy(id = "sell", side = TradeSide.SELL, date = sunday.date, price = "1020")
+        val closed = PortfolioMath(Portfolio(listOf(bond), listOf(buy, sold), quotes = listOf(friday, sunday)))
+        val soldChange = requireNotNull(closed.overview(day(sunday.date)).marketValueChange)
+        assertMoney("-2000", soldChange.amount)
+        assertMoney("-100", soldChange.percent)
+    }
+
+    @Test
     fun showsPartialResultFromIssuesWithKnownValuationsAndCashFlows() {
         val noAccrued = bond.copy(isin = "RU000A10C5Z7")
         val unknownCost = bond.copy(isin = "RU000A10GDW3")
@@ -490,7 +520,8 @@ class PortfolioTest {
             listOf(defaultPortfolio, secondAccount)
         )
         val today = day("2026-11-21")
-        val total = PortfolioMath(data).overview(today)
+        val math = PortfolioMath(data)
+        val total = math.overview(today)
         val point = total.points.last()
         assertMoney("3000", point.value)
         assertTrue(point.valueIsPartial)
@@ -504,6 +535,19 @@ class PortfolioTest {
         assertEquals(2, point.issuesWithResult)
         assertEquals(4, point.issuesTracked)
         assertTrue(point.resultIsPartial)
+        val details = math.resultExclusions(today).associateBy { it.bond.isin }
+        assertEquals(setOf(noAccrued.isin, unknownCost.isin), details.keys)
+        assertEquals(ValuationIssue.MissingFields(listOf(QuoteField.ACCRUED)), details[noAccrued.isin]?.holding?.issue)
+        assertEquals("unknown-cost", details[unknownCost.isin]?.incompleteTrades?.single()?.id)
+        assertNull(details[unknownCost.isin]?.holding)
+
+        val missingRedemption = data.copy(payments = data.payments.map {
+            if (it.isin == redeemed.isin) it.copy(amountPerBond = null) else it
+        })
+        val redemptionDetails = PortfolioMath(missingRedemption).resultExclusions(today).single { it.bond.isin == redeemed.isin }
+        assertNull(redemptionDetails.holding)
+        assertEquals("redemption", redemptionDetails.incompletePayments.single().id)
+        assertTrue(math.resultExclusions(day("2026-11-19")).all { it.incompletePayments.isEmpty() })
 
         val first = PortfolioMath(data.scoped(DEFAULT_PORTFOLIO_ID)).overview(today).points.last()
         assertMoney("220", first.result)

@@ -18,6 +18,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
+import java.time.LocalDate
 
 internal fun ValuationIssue.description(): String = when (this) {
     ValuationIssue.NoQuote -> "Котировка по выпуску отсутствует"
@@ -38,22 +39,61 @@ internal fun ValuationIssue.description(): String = when (this) {
 }
 
 @Composable
-internal fun ValuationDetailsDialog(holdings: List<Holding>, close: () -> Unit, openBond: (String) -> Unit) {
+internal fun ValuationDetailsDialog(holdings: List<Holding>?, day: LocalDate?, close: () -> Unit, openBond: (String) -> Unit) {
+    val rows = holdings?.map { holding ->
+        DetailRow(holding.bond, holding.quoteDate, buildList {
+            holding.issue?.let { add(it.description()) }
+            holding.estimatedAccrued?.let { add("Расчётный НКД · ${rubles(it)} / шт.") }
+        })
+    }
+    BreakdownDialog("Подробности оценки", day, rows, "Данные для всех позиций уже получены", close, openBond)
+}
+
+@Composable
+internal fun ResultDetailsDialog(exclusions: List<ResultExclusion>?, day: LocalDate, close: () -> Unit, openBond: (String) -> Unit) {
+    val rows = exclusions?.map { exclusion ->
+        DetailRow(exclusion.bond, exclusion.holding?.quoteDate, buildList {
+            exclusion.holding?.issue?.let { add(it.description()) }
+            exclusion.incompleteTrades.sortedByDescending { it.date }.forEach { trade ->
+                val side = if (trade.side == TradeSide.BUY) "Покупка" else "Продажа"
+                val missing = if (trade.unit == PriceUnit.PERCENT) "НКД или номинал" else "НКД"
+                add("$side от ${dateLabel(trade.date, true)} · для суммы сделки нужны $missing")
+            }
+            exclusion.incompletePayments.sortedByDescending { it.date }.forEach { payment ->
+                val reason = when {
+                    exclusion.bond.requiresPaymentVerification(payment.date) -> "исполнение не подтверждено"
+                    payment.amountPerBond == null -> "сумма на бумагу неизвестна"
+                    else -> "остаток бумаг неизвестен"
+                }
+                add("${payment.kind.label} от ${dateLabel(payment.date, true)} · $reason")
+            }
+        })
+    }
+    BreakdownDialog("Подробности финансового результата", day, rows, "Все выпуски вошли в расчёт", close, openBond)
+}
+
+private data class DetailRow(val bond: Bond, val quoteDate: String?, val messages: List<String>)
+
+@Composable
+private fun BreakdownDialog(
+    title: String, day: LocalDate?, rows: List<DetailRow>?, emptyMessage: String, close: () -> Unit, openBond: (String) -> Unit
+) {
     AlertDialog(
         onDismissRequest = close,
-        title = { Text("Подробности оценки") },
+        title = { Text(title) },
         text = {
-            if (holdings.isEmpty()) Text("Данные для всех позиций уже получены")
-            else LazyColumn(Modifier.fillMaxWidth().heightIn(max = 420.dp)) {
-                items(holdings, key = { it.bond.isin }) { holding ->
-                    Row(Modifier.fillMaxWidth().clickable { openBond(holding.bond.isin) }.padding(vertical = 10.dp),
+            LazyColumn(Modifier.fillMaxWidth().heightIn(max = 420.dp)) {
+                if (day != null) item { Text(dateLabel(day.toString()), color = Muted) }
+                if (rows == null) item { Text("Загружаем подробности…", color = Muted) }
+                else if (rows.isEmpty()) item { Text(emptyMessage) }
+                else items(rows, key = { it.bond.isin }) { row ->
+                    Row(Modifier.fillMaxWidth().clickable { openBond(row.bond.isin) }.padding(vertical = 10.dp),
                         horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
                         Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                            Text(holding.bond.name, style = MaterialTheme.typography.titleMedium)
-                            Text(holding.bond.isin, color = Muted, style = MaterialTheme.typography.bodySmall)
-                            holding.quoteDate?.let { Text("Последняя котировка ${dateLabel(it, true)}", color = Muted) }
-                            holding.issue?.let { Text(it.description(), color = Amber) }
-                            holding.estimatedAccrued?.let { Text("Расчётный НКД · ${rubles(it)} / шт.", color = Amber) }
+                            Text(row.bond.name, style = MaterialTheme.typography.titleMedium)
+                            Text(row.bond.isin, color = Muted, style = MaterialTheme.typography.bodySmall)
+                            row.quoteDate?.let { Text("Последняя котировка ${dateLabel(it, true)}", color = Muted) }
+                            row.messages.forEach { Text(it, color = Amber) }
                         }
                         Glyph(Symbol.NEXT, color = Forest)
                     }

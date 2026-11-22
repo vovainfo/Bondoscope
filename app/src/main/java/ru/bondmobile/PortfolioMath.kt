@@ -64,8 +64,27 @@ data class Overview(
     val points: List<PortfolioPoint>,
     val receivedCoupons: BigDecimal,
     val receivedPrincipal: BigDecimal,
-    val payoutsIncomplete: Boolean
+    val payoutsIncomplete: Boolean,
+    val marketValueChange: MarketValueChange? = null
 )
+
+data class MarketValueChange(
+    val date: LocalDate,
+    val previousDate: LocalDate,
+    val amount: BigDecimal,
+    val percent: BigDecimal?,
+    val comparablePositions: Int,
+    val totalPositions: Int
+)
+
+internal data class ResultExclusion(
+    val bond: Bond,
+    val holding: Holding?,
+    val incompleteTrades: List<Trade>,
+    val incompletePayments: List<Payment>
+)
+
+private data class SessionValuation(val date: LocalDate, val holdings: List<Holding>)
 
 data class PaymentEstimate(val units: Long?, val amount: BigDecimal?)
 
@@ -218,6 +237,33 @@ class PortfolioMath(private val portfolio: Portfolio) {
             summarizeReceipts(rows)
         }
 
+    internal fun holdingsAt(day: LocalDate): List<Holding> = holdingsAt(day, tradesThrough(day.toString()))
+
+    internal fun resultExclusions(day: LocalDate, currentHoldings: List<Holding>? = null): List<ResultExclusion> {
+        val date = day.toString()
+        val history = tradesThrough(date)
+        val unavailable = (currentHoldings ?: holdingsAt(day, history))
+            .filter { it.value == null }.associateBy { it.bond.isin }
+        val incompletePayments = receivedBy(day).filter { (_, amount) -> amount == null }
+            .map { it.first }.groupBy { it.isin }
+        return history.mapNotNull { (isin, rows) ->
+            val issue = unavailable[isin]
+            val tradeGaps = rows.filter { tradeValue(it) == null }
+            val paymentGaps = incompletePayments[isin].orEmpty()
+            if (issue == null && tradeGaps.isEmpty() && paymentGaps.isEmpty()) null
+            else ResultExclusion(bondFor(isin), issue, tradeGaps, paymentGaps)
+        }.sortedBy { it.bond.name }
+    }
+
+    private fun tradesThrough(date: String): Map<String, List<Trade>> =
+        portfolio.trades.filter { it.date <= date }.groupBy { it.isin }
+
+    private fun holdingsAt(day: LocalDate, history: Map<String, List<Trade>>): List<Holding> {
+        val date = day.toString()
+        return history.mapNotNull { (isin, rows) -> openHolding(isin, rows.sumOf { it.signedQuantity() }, day, date) }
+            .sortedBy { it.bond.name }
+    }
+
     fun overview(today: LocalDate = marketToday()): Overview {
         val date = today.toString()
         val dailyTrades = portfolio.trades.groupBy { it.date }
@@ -233,13 +279,17 @@ class PortfolioMath(private val portfolio: Portfolio) {
         }
         val series = mutableListOf<PortfolioPoint>()
         val first = portfolio.trades.minOfOrNull { LocalDate.parse(it.date) } ?: today
+        val firstDate = first.toString()
+        val sessionDates = portfolio.quotes.asSequence()
+            .filter { it.isin in trades && it.cleanPercent != null && it.date in firstDate..date }
+            .map { it.date }.distinct().sortedDescending().take(2).toSet()
+        val sessions = mutableListOf<SessionValuation>()
         var day = minOf(first, today)
         var holdings = emptyList<Holding>()
         while (day <= today) {
             val key = day.toString()
             dailyTrades[key].orEmpty().forEach { trade ->
-                val delta = if (trade.side == TradeSide.BUY) trade.quantity.toLong() else -trade.quantity.toLong()
-                balance[trade.isin] = balance.getOrDefault(trade.isin, 0) + delta
+                balance[trade.isin] = balance.getOrDefault(trade.isin, 0) + trade.signedQuantity()
                 addFlow(trade.isin, costFlows[trade.id])
             }
             dailyReceived[key].orEmpty().forEach { (payment, amount) ->
@@ -255,8 +305,7 @@ class PortfolioMath(private val portfolio: Portfolio) {
             var issuesWithResult = 0
             for ((isin, flow) in flows) {
                 val count = balance.getOrDefault(isin, 0)
-                val closed = closures[isin]?.let { it <= key } == true
-                val current = if (count > 0 && !closed) holding(isin, count, day) else null
+                val current = openHolding(isin, count, day, key)
                 current?.let(active::add)
                 val holdingValue = if (current == null) BigDecimal.ZERO else current.value
                 if (holdingValue == null) continue
@@ -285,6 +334,7 @@ class PortfolioMath(private val portfolio: Portfolio) {
                     issuesTracked = flows.size
                 )
             }
+            if (key in sessionDates) sessions += SessionValuation(day, active)
             if (day == today) holdings = active.sortedBy { it.bond.name }
             day = day.plusDays(1)
         }
@@ -293,9 +343,42 @@ class PortfolioMath(private val portfolio: Portfolio) {
             series,
             totals.coupons,
             totals.principal,
-            totals.incomplete
+            totals.incomplete,
+            if (sessions.size == 2 && ChronoUnit.DAYS.between(sessions.last().date, today) <= MAX_QUOTE_AGE_DAYS)
+                marketValueChange(sessions.first(), sessions.last()) else null
         )
     }
+
+    private fun marketValueChange(previous: SessionValuation, current: SessionValuation): MarketValueChange? {
+        val before = previous.holdings.associateBy { it.bond.isin }
+        val after = current.holdings.associateBy { it.bond.isin }
+        val issues = before.keys + after.keys
+        var comparable = 0
+        var previousValue = BigDecimal.ZERO
+        var currentValue = BigDecimal.ZERO
+        for (isin in issues) {
+            val old = before[isin]
+            val new = after[isin]
+            val oldValue = if (old == null) BigDecimal.ZERO else old.value ?: continue
+            val newValue = if (new == null) BigDecimal.ZERO else new.value ?: continue
+            previousValue += oldValue
+            currentValue += newValue
+            comparable++
+        }
+        if (comparable == 0) return null
+        val change = currentValue - previousValue
+        val percent = previousValue.takeIf { it.signum() > 0 }?.let {
+            change.movePointRight(2).divide(it, 2, RoundingMode.HALF_UP)
+        }
+        return MarketValueChange(current.date, previous.date, change, percent, comparable, issues.size)
+    }
+
+    private fun Trade.signedQuantity(): Long = if (side == TradeSide.BUY) quantity.toLong() else -quantity.toLong()
+
+    private fun openHolding(isin: String, count: Long, day: LocalDate, date: String): Holding? =
+        if (count > 0 && closures[isin]?.let { it <= date } != true) holding(isin, count, day) else null
+
+    private fun bondFor(isin: String): Bond = bonds[isin] ?: Bond(isin, isin, isin)
 
     private fun receivedBy(today: LocalDate): List<Pair<Payment, BigDecimal?>> {
         val date = today.toString()
@@ -330,7 +413,7 @@ class PortfolioMath(private val portfolio: Portfolio) {
     }
 
     private fun holding(isin: String, count: Long, day: LocalDate): Holding {
-        val bond = bonds[isin] ?: Bond(isin, isin, isin)
+        val bond = bondFor(isin)
         val date = day.toString()
         val quote = quoteAt(isin, date)
         fun unavailable(issue: ValuationIssue) = Holding(bond, count, null, quote, issue)
