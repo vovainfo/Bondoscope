@@ -10,16 +10,29 @@ import java.util.Locale
 
 const val MAX_QUOTE_AGE_DAYS = 7L
 
-data class Holding(
+@ConsistentCopyVisibility
+data class Holding internal constructor(
     val bond: Bond,
-    val quantity: Long,
-    val value: BigDecimal?,
     val quote: Quote?,
-    val issue: ValuationIssue?,
-    val estimatedAccrued: BigDecimal? = null
+    internal val clean: CleanPosition,
+    val accruedPerBond: BigDecimal? = null,
+    val accruedIssue: ValuationIssue? = null,
+    val accruedIsEstimated: Boolean = false
 ) {
+    val quantity: Long get() = clean.quantity
     val quoteDate: String? get() = quote?.date
+    val cleanValue: BigDecimal? get() = clean.cleanAmount
+    val cleanIssue: ValuationIssue? get() = clean.issue
+    val priceIsEstimated: Boolean get() = clean.priceIsEstimated
+    val estimatedAccrued: BigDecimal? get() = accruedPerBond.takeIf { accruedIsEstimated }
+    val accruedValue: BigDecimal? = accruedPerBond?.multiply(quantity.toBigDecimal())
+    val value: BigDecimal? = knownValue(cleanValue, accruedValue)
+    val valueIsComplete: Boolean get() = cleanValue != null && accruedValue != null
+    val usesEstimatedValuation: Boolean get() = priceIsEstimated || accruedIsEstimated
 }
+
+private fun knownValue(clean: BigDecimal?, accrued: BigDecimal?): BigDecimal? =
+    clean?.let { it + (accrued ?: BigDecimal.ZERO) } ?: accrued
 
 enum class QuoteField { PRICE, NOMINAL, ACCRUED }
 
@@ -38,7 +51,8 @@ sealed interface ValuationIssue {
     data object UnsupportedCurrency : ValuationIssue
     data object Maturity : ValuationIssue
     data object NominalChanged : ValuationIssue
-    data class AfterPayment(val date: String, val kind: PaymentKind) : ValuationIssue
+    data class PrincipalUnverified(val date: String, val kind: PaymentKind) : ValuationIssue
+    data class AccruedAfterPrincipal(val date: String) : ValuationIssue
     data class CouponUnverified(val date: String) : ValuationIssue
     data class CouponAccrualUnknown(val date: String) : ValuationIssue
     data class MissingFields(val fields: List<QuoteField>) : ValuationIssue
@@ -49,15 +63,17 @@ data class PortfolioPoint(
     val value: BigDecimal?,
     val result: BigDecimal?,
     val usesEstimatedValuation: Boolean,
-    val positionsWithValue: Int,
+    val accruedValue: BigDecimal?,
+    val positionsWithAccrued: Int,
     val openPositions: Int,
     val resultUsesEstimatedValuation: Boolean,
     val issuesWithResult: Int,
     val issuesTracked: Int,
     val cleanValue: BigDecimal?,
-    val positionsWithCleanValue: Int
+    val positionsWithCleanValue: Int,
+    val usesEstimatedCleanPrice: Boolean
 ) {
-    val valueIsPartial: Boolean get() = value != null && positionsWithValue < openPositions
+    val valueIsPartial: Boolean get() = positionsWithCleanValue < openPositions || positionsWithAccrued < openPositions
     val cleanValueIsPartial: Boolean get() = cleanValue != null && positionsWithCleanValue < openPositions
     val resultIsPartial: Boolean get() = result != null && issuesWithResult < issuesTracked
 }
@@ -109,11 +125,12 @@ data class IssuePriceChange(
     val principalEvents: List<Payment>
 )
 
-private data class CleanPosition(
-    val price: BigDecimal?, val nominal: BigDecimal?, val quantity: Long, val quoteDate: String?, val issue: ValuationIssue?
+internal data class CleanPosition(
+    val price: BigDecimal?, val nominal: BigDecimal?, val quantity: Long, val quoteDate: String?,
+    val issue: ValuationIssue?, val priceIsEstimated: Boolean = false
 ) {
-    val cleanAmount: BigDecimal?
-        get() = if (quantity == 0L) BigDecimal.ZERO else if (price == null || nominal == null) null
+    val cleanAmount: BigDecimal? =
+        if (quantity == 0L) BigDecimal.ZERO else if (price == null || nominal == null) null
         else price.movePointLeft(2) * nominal * quantity.toBigDecimal()
 
     val premiumAmount: BigDecimal?
@@ -129,6 +146,9 @@ internal data class ResultExclusion(
 )
 
 private data class ValuationSnapshot(val date: LocalDate, val holdings: List<Holding>)
+
+private val Payment.affectsNominal: Boolean
+    get() = kind == PaymentKind.AMORTIZATION || kind == PaymentKind.PRINCIPAL
 
 data class PaymentEstimate(val units: Long?, val amount: BigDecimal?)
 
@@ -242,12 +262,12 @@ class PortfolioMath(private val portfolio: Portfolio) {
             snapshot != null && snapshotDate != null && snapshotDate <= date &&
                 (quote == null || snapshotDate >= quote.date) -> snapshotDate to snapshot
             quote != null -> quote.date to requireNotNull(quote.nominal)
-            else -> return null
+            else -> return nominalAt(bond.isin, date, null)
         }
         var amount = baseNominal.toBigDecimal()
         for (payment in payments[bond.isin].orEmpty()) {
-            if ((payment.kind == PaymentKind.AMORTIZATION || payment.kind == PaymentKind.PRINCIPAL) &&
-                payment.date > baseDate && payment.date <= date && !bond.requiresPaymentVerification(payment.date)) {
+            if (payment.affectsNominal && payment.date > baseDate && payment.date <= date &&
+                !bond.requiresPaymentVerification(payment.date)) {
                 amount -= payment.amountPerBond?.toBigDecimal() ?: return null
             }
         }
@@ -284,15 +304,6 @@ class PortfolioMath(private val portfolio: Portfolio) {
 
     internal fun holdingsAt(day: LocalDate): List<Holding> = holdingsAt(day, tradesThrough(day.toString()))
 
-    internal fun cleanValuationIssues(day: LocalDate): List<Holding> {
-        val date = day.toString()
-        return holdingsAt(day).mapNotNull { holding ->
-            cleanPosition(holding.bond, holding.quantity, day, date, holding.quote).issue?.let { issue ->
-                holding.copy(value = null, issue = issue, estimatedAccrued = null)
-            }
-        }
-    }
-
     internal fun cleanValueChange(start: LocalDate, end: LocalDate): PortfolioPriceChange =
         priceChange(ValuationSnapshot(start, holdingsAt(start)), ValuationSnapshot(end, holdingsAt(end)), subtractNominal = false)
 
@@ -300,7 +311,7 @@ class PortfolioMath(private val portfolio: Portfolio) {
         val date = day.toString()
         val history = tradesThrough(date)
         val unavailable = (currentHoldings ?: holdingsAt(day, history))
-            .filter { it.value == null }.associateBy { it.bond.isin }
+            .filterNot { it.valueIsComplete }.associateBy { it.bond.isin }
         val incompletePayments = receivedBy(day).filter { (_, amount) -> amount == null }
             .map { it.first }.groupBy { it.isin }
         return history.mapNotNull { (isin, rows) ->
@@ -354,11 +365,12 @@ class PortfolioMath(private val portfolio: Portfolio) {
             }
 
             val active = mutableListOf<Holding>()
-            var value = BigDecimal.ZERO
             var cleanValue = BigDecimal.ZERO
+            var accruedValue = BigDecimal.ZERO
             var result = BigDecimal.ZERO
-            var positionsWithValue = 0
             var positionsWithCleanValue = 0
+            var positionsWithAccrued = 0
+            var usesEstimatedCleanPrice = false
             var usesEstimatedValuation = false
             var resultUsesEstimatedValuation = false
             var issuesWithResult = 0
@@ -367,38 +379,42 @@ class PortfolioMath(private val portfolio: Portfolio) {
                 val current = openHolding(isin, count, day, key)
                 if (current != null) {
                     active += current
-                    cleanPosition(current.bond, count, day, key, current.quote).cleanAmount?.let {
+                    current.cleanValue?.let {
                         cleanValue += it
                         positionsWithCleanValue++
                     }
-                }
-                val holdingValue = if (current == null) BigDecimal.ZERO else current.value
-                if (holdingValue == null) continue
-                val estimated = current?.estimatedAccrued != null
-                if (current != null) {
-                    value += holdingValue
-                    positionsWithValue++
-                    usesEstimatedValuation = usesEstimatedValuation || estimated
+                    current.accruedValue?.let {
+                        accruedValue += it
+                        positionsWithAccrued++
+                    }
+                    usesEstimatedCleanPrice = usesEstimatedCleanPrice || current.priceIsEstimated
+                    usesEstimatedValuation = usesEstimatedValuation || current.usesEstimatedValuation
                 }
                 if (flow != null) {
+                    val holdingValue = if (current == null) BigDecimal.ZERO
+                        else current.value.takeIf { current.valueIsComplete } ?: continue
                     result += holdingValue + flow
                     issuesWithResult++
-                    resultUsesEstimatedValuation = resultUsesEstimatedValuation || estimated
+                    resultUsesEstimatedValuation = resultUsesEstimatedValuation || current?.usesEstimatedValuation == true
                 }
             }
             if (portfolio.trades.isNotEmpty()) {
+                val knownCleanValue = cleanValue.takeIf { active.isEmpty() || positionsWithCleanValue > 0 }
+                val knownAccruedValue = accruedValue.takeIf { active.isEmpty() || positionsWithAccrued > 0 }
                 series += PortfolioPoint(
                     date = day,
-                    value = value.takeIf { active.isEmpty() || positionsWithValue > 0 },
+                    value = knownValue(knownCleanValue, knownAccruedValue),
                     result = result.takeIf { issuesWithResult > 0 },
                     usesEstimatedValuation = usesEstimatedValuation,
-                    positionsWithValue = positionsWithValue,
+                    accruedValue = knownAccruedValue,
+                    positionsWithAccrued = positionsWithAccrued,
                     openPositions = active.size,
                     resultUsesEstimatedValuation = resultUsesEstimatedValuation,
                     issuesWithResult = issuesWithResult,
                     issuesTracked = flows.size,
-                    cleanValue = cleanValue.takeIf { active.isEmpty() || positionsWithCleanValue > 0 },
-                    positionsWithCleanValue = positionsWithCleanValue
+                    cleanValue = knownCleanValue,
+                    positionsWithCleanValue = positionsWithCleanValue,
+                    usesEstimatedCleanPrice = usesEstimatedCleanPrice
                 )
             }
             if (key in sessionDates) sessions += ValuationSnapshot(day, active)
@@ -411,15 +427,15 @@ class PortfolioMath(private val portfolio: Portfolio) {
             totals.coupons,
             totals.principal,
             totals.incomplete,
-            premiumValue(holdings, today, date),
+            premiumValue(holdings),
             if (sessions.size == 2 && ChronoUnit.DAYS.between(sessions.last().date, today) <= MAX_QUOTE_AGE_DAYS)
                 priceChange(sessions.first(), sessions.last(), subtractNominal = true).takeIf { it.issues.isNotEmpty() }
             else null
         )
     }
 
-    private fun premiumValue(holdings: List<Holding>, day: LocalDate, date: String): PremiumValue {
-        val values = holdings.mapNotNull { cleanPosition(it.bond, it.quantity, day, date, it.quote).premiumAmount }
+    private fun premiumValue(holdings: List<Holding>): PremiumValue {
+        val values = holdings.mapNotNull { it.clean.premiumAmount }
         val amount = values.sumOf { it }.takeIf { values.isNotEmpty() || holdings.isEmpty() }
         return PremiumValue(amount, values.size)
     }
@@ -431,8 +447,8 @@ class PortfolioMath(private val portfolio: Portfolio) {
         val end = current.date.toString()
         val issues = (before.keys + after.keys).map { isin ->
             val bond = bondFor(isin)
-            val old = cleanPosition(bond, before[isin]?.quantity ?: 0, previous.date, start, quoteAt(isin, start))
-            val new = cleanPosition(bond, after[isin]?.quantity ?: 0, current.date, end, quoteAt(isin, end))
+            val old = before[isin]?.clean ?: holding(isin, 0, previous.date).clean
+            val new = after[isin]?.clean ?: holding(isin, 0, current.date).clean
             val percentagePoints = old.price?.takeIf { old.quoteDate != new.quoteDate }?.let { base ->
                 new.price?.minus(base)
             }
@@ -441,9 +457,10 @@ class PortfolioMath(private val portfolio: Portfolio) {
             }
             val oldAmount = if (subtractNominal) old.premiumAmount else old.cleanAmount
             val newAmount = if (subtractNominal) new.premiumAmount else new.cleanAmount
-            val amount = if (oldAmount != null && newAmount != null) newAmount - oldAmount else null
+            val amount = if (oldAmount != null && newAmount != null && !old.priceIsEstimated && !new.priceIsEstimated)
+                newAmount - oldAmount else null
             val principal = payments[isin].orEmpty().filter {
-                (it.kind == PaymentKind.AMORTIZATION || it.kind == PaymentKind.PRINCIPAL) && it.date > start && it.date <= end
+                it.affectsNominal && it.date > start && it.date <= end
             }.sortedBy { it.date }
             IssuePriceChange(bond, old.price, new.price, percent, percentagePoints, old.nominal, new.nominal,
                 old.quantity, new.quantity, amount, principal)
@@ -452,32 +469,37 @@ class PortfolioMath(private val portfolio: Portfolio) {
             if (subtractNominal) issues.sortedByAbsoluteChange(IssuePriceChange::percent) else issues)
     }
 
-    private fun cleanPosition(bond: Bond, quantity: Long, day: LocalDate, date: String, quote: Quote?): CleanPosition {
-        val schedule = payments[bond.isin].orEmpty()
+    private fun cleanPosition(
+        bond: Bond, quantity: Long, day: LocalDate, quote: Quote?, crossedPrincipal: List<Payment>
+    ): CleanPosition {
+        val date = day.toString()
         val nominal = remainingNominal(bond, date)
         fun unavailable(issue: ValuationIssue) = CleanPosition(null, nominal, quantity, quote?.date, issue)
-        if (bond.maturity?.let { it <= date } == true || schedule.any { it.kind == PaymentKind.REDEMPTION && it.date <= date }) {
+        if (bond.currency?.isRubles() == false) return unavailable(ValuationIssue.UnsupportedCurrency)
+        if (bond.maturity?.let { it <= date } == true ||
+            payments[bond.isin].orEmpty().any { it.kind == PaymentKind.REDEMPTION && it.date <= date }) {
             return unavailable(ValuationIssue.Maturity)
         }
         if (quote == null) return unavailable(ValuationIssue.NoQuote)
         if (ChronoUnit.DAYS.between(LocalDate.parse(quote.date), day) > MAX_QUOTE_AGE_DAYS) {
             return unavailable(ValuationIssue.OldQuote)
         }
-        schedule.filter { it.kind != PaymentKind.COUPON && it.date > quote.date && it.date <= date }
-            .maxByOrNull { it.date }?.let { return unavailable(ValuationIssue.AfterPayment(it.date, it.kind)) }
-        if (quote.nominal != null && nominal != null && quote.nominal.toBigDecimal().compareTo(nominal) != 0) {
+        crossedPrincipal.filter { bond.requiresPaymentVerification(it.date) }.maxByOrNull { it.date }?.let {
+            return unavailable(ValuationIssue.PrincipalUnverified(it.date, it.kind))
+        }
+        if (crossedPrincipal.isEmpty() && quote.nominal != null && nominal != null &&
+            quote.nominal.toBigDecimal().compareTo(nominal) != 0) {
             return unavailable(ValuationIssue.NominalChanged)
         }
         val price = quote.cleanPercent?.toBigDecimal()
-        val issue = when {
-            bond.currency?.isRubles() == false -> ValuationIssue.UnsupportedCurrency
-            price == null || nominal == null -> ValuationIssue.MissingFields(buildList {
+        val issue = if (price == null || nominal == null) {
+            ValuationIssue.MissingFields(buildList {
                 if (price == null) add(QuoteField.PRICE)
                 if (nominal == null) add(QuoteField.NOMINAL)
             })
-            else -> null
-        }
-        return CleanPosition(price, nominal, quantity, quote.date, issue)
+        } else null
+        return CleanPosition(price, nominal, quantity, quote.date, issue,
+            priceIsEstimated = issue == null && crossedPrincipal.isNotEmpty())
     }
 
     private fun Trade.signedQuantity(): Long = if (side == TradeSide.BUY) quantity.toLong() else -quantity.toLong()
@@ -524,50 +546,29 @@ class PortfolioMath(private val portfolio: Portfolio) {
         val bond = bondFor(isin)
         val date = day.toString()
         val quote = quoteAt(isin, date)
-        fun unavailable(issue: ValuationIssue) = Holding(bond, count, null, quote, issue)
-        if (bond.currency != null && !bond.currency.isRubles()) {
-            return unavailable(ValuationIssue.UnsupportedCurrency)
-        }
         val schedule = payments[isin].orEmpty()
-        val matured = bond.maturity?.let { it <= date } == true || schedule.any {
-            it.kind == PaymentKind.REDEMPTION && it.date <= date
-        }
-        if (matured) return unavailable(ValuationIssue.Maturity)
-        if (quote == null) return unavailable(ValuationIssue.NoQuote)
-        if (ChronoUnit.DAYS.between(LocalDate.parse(quote.date), day) > MAX_QUOTE_AGE_DAYS) {
-            return unavailable(ValuationIssue.OldQuote)
-        }
+        val crossedPayments = if (quote == null) emptyList() else schedule.filter { it.date > quote.date && it.date <= date }
+        val crossedPrincipal = crossedPayments.filter { it.affectsNominal }
+        val clean = cleanPosition(bond, count, day, quote, crossedPrincipal)
+        val base = Holding(bond, quote, clean)
+        if (quote == null || (clean.issue != null && clean.issue !is ValuationIssue.MissingFields)) return base
 
-        val crossedPayments = schedule.filter { it.date > quote.date && it.date <= date }
-        val principal = crossedPayments.filter { it.kind != PaymentKind.COUPON }.maxByOrNull { it.date }
-        if (principal != null) return unavailable(ValuationIssue.AfterPayment(principal.date, principal.kind))
-
-        val nominal = nominalAt(isin, quote.date, quote)
-        val currentNominal = if (quote.date == date) nominal else nominalAt(isin, date, null)
-        if (nominal != null && currentNominal != null && nominal.compareTo(currentNominal) != 0) {
-            return unavailable(ValuationIssue.NominalChanged)
-        }
-
-        val lastCoupon = crossedPayments.maxByOrNull { it.date }
+        val lastCoupon = crossedPayments.filter { it.kind == PaymentKind.COUPON }.maxByOrNull { it.date }
         if (lastCoupon != null && bond.requiresPaymentVerification(lastCoupon.date)) {
-            return unavailable(ValuationIssue.CouponUnverified(lastCoupon.date))
+            return base.copy(accruedIssue = ValuationIssue.CouponUnverified(lastCoupon.date))
+        }
+        val lastPrincipal = crossedPrincipal.maxByOrNull { it.date }
+        if (lastPrincipal != null && (lastCoupon == null || lastCoupon.date < lastPrincipal.date)) {
+            return base.copy(accruedIssue = ValuationIssue.AccruedAfterPrincipal(lastPrincipal.date))
+        }
+        if (lastCoupon != null) {
+            val estimatedAccrued = clean.nominal?.let { couponAccruedAt(schedule, day, lastCoupon.date, it) }
+                ?: return base.copy(accruedIssue = ValuationIssue.CouponAccrualUnknown(lastCoupon.date))
+            return base.copy(accruedPerBond = estimatedAccrued, accruedIsEstimated = true)
         }
         val quotedAccrued = quote.accrued?.toBigDecimal()
-        val clean = quote.cleanPercent?.toBigDecimal()
-        if (nominal == null || clean == null || (lastCoupon == null && quotedAccrued == null)) {
-            return unavailable(ValuationIssue.MissingFields(buildList {
-                if (clean == null) add(QuoteField.PRICE)
-                if (nominal == null) add(QuoteField.NOMINAL)
-                if (lastCoupon == null && quotedAccrued == null) add(QuoteField.ACCRUED)
-            }))
-        }
-        val estimatedAccrued = lastCoupon?.let { couponAccruedAt(schedule, day, it.date, nominal) }
-        if (lastCoupon != null && estimatedAccrued == null) {
-            return unavailable(ValuationIssue.CouponAccrualUnknown(lastCoupon.date))
-        }
-        val accrued = estimatedAccrued ?: requireNotNull(quotedAccrued)
-        val value = (clean.multiply(nominal).movePointLeft(2) + accrued) * count.toBigDecimal()
-        return Holding(bond, count, value, quote, null, estimatedAccrued)
+            ?: return base.copy(accruedIssue = ValuationIssue.MissingFields(listOf(QuoteField.ACCRUED)))
+        return base.copy(accruedPerBond = quotedAccrued)
     }
 
     private fun couponAccruedAt(schedule: List<Payment>, day: LocalDate, start: String, nominal: BigDecimal): BigDecimal? {

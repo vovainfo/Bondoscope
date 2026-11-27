@@ -36,14 +36,15 @@ internal fun ValuationIssue.description(): String = when (this) {
     ValuationIssue.UnsupportedCurrency -> "Оценка в валюте этого выпуска недоступна"
     ValuationIssue.Maturity -> "Наступила дата погашения · исполнение не подтверждено"
     ValuationIssue.NominalChanged -> "Номинал изменился после последней котировки"
-    is ValuationIssue.AfterPayment -> "После последней котировки наступила дата выплаты по календарю · ${kind.label} ${dateLabel(date, true)}"
+    is ValuationIssue.PrincipalUnverified -> "Исполнение выплаты от ${dateLabel(date, true)} не подтверждено · ${kind.label}"
+    is ValuationIssue.AccruedAfterPrincipal -> "НКД после выплаты номинала от ${dateLabel(date, true)} неизвестен"
     is ValuationIssue.CouponUnverified -> "Исполнение купона от ${dateLabel(date, true)} не подтверждено · нет актуальной котировки"
     is ValuationIssue.CouponAccrualUnknown -> "Недостаточно данных для расчёта НКД после купона ${dateLabel(date, true)}"
-    is ValuationIssue.MissingFields -> "В данных на дату котировки нет " + fields.joinToString(", ") {
+    is ValuationIssue.MissingFields -> fields.joinToString(" · ") {
         when (it) {
-            QuoteField.PRICE -> "цены"
-            QuoteField.NOMINAL -> "номинала"
-            QuoteField.ACCRUED -> "НКД"
+            QuoteField.PRICE -> "В данных на дату котировки нет цены"
+            QuoteField.NOMINAL -> "Остаток номинала неизвестен"
+            QuoteField.ACCRUED -> "В данных на дату котировки нет НКД"
         }
     }
 }
@@ -52,11 +53,22 @@ internal fun ValuationIssue.description(): String = when (this) {
 internal fun ValuationDetailsDialog(
     holdings: List<Holding>?, day: LocalDate?, close: () -> Unit, openBond: (String) -> Unit, withoutAccrued: Boolean
 ) {
-    val rows = holdings?.map { holding ->
-        DetailRow(holding.bond, holding.quoteDate, buildList {
-            holding.issue?.let { add(it.description()) }
-            holding.estimatedAccrued?.let { add("Расчётный НКД · ${rubles(it)} / шт.") }
-        })
+    val rows = holdings?.mapNotNull { holding ->
+        val messages = buildList {
+            holding.cleanIssue?.let { add(it.description()) }
+            if (holding.priceIsEstimated) add("Расчётная цена · к остатку номинала")
+            if (!withoutAccrued) {
+                holding.accruedIssue?.let { add(it.description()) }
+                holding.estimatedAccrued?.let { add("Расчётный НКД · ${rubles(it)} / шт.") }
+                if (holding.accruedIssue != null) {
+                    holding.cleanValue?.let { add("Учтена чистая стоимость · ${rubles(it)}") }
+                }
+                if (holding.cleanIssue != null) {
+                    holding.accruedValue?.let { add("Учтён НКД · ${rubles(it)}") }
+                }
+            }
+        }
+        if (messages.isEmpty()) null else DetailRow(holding.bond, holding.quoteDate, messages)
     }
     val title = if (withoutAccrued) "Оценка без НКД" else "Подробности оценки"
     BreakdownDialog(title, day, rows, "Данные для всех позиций уже получены", close, openBond)
@@ -66,7 +78,8 @@ internal fun ValuationDetailsDialog(
 internal fun ResultDetailsDialog(exclusions: List<ResultExclusion>?, day: LocalDate, close: () -> Unit, openBond: (String) -> Unit) {
     val rows = exclusions?.map { exclusion ->
         DetailRow(exclusion.bond, exclusion.holding?.quoteDate, buildList {
-            exclusion.holding?.issue?.let { add(it.description()) }
+            exclusion.holding?.cleanIssue?.let { add(it.description()) }
+            exclusion.holding?.accruedIssue?.let { add(it.description()) }
             exclusion.incompleteTrades.sortedByDescending { it.date }.forEach { trade ->
                 val side = if (trade.side == TradeSide.BUY) "Покупка" else "Продажа"
                 val missing = if (trade.unit == PriceUnit.PERCENT) "НКД или номинал" else "НКД"

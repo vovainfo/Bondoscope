@@ -115,8 +115,8 @@ internal fun PortfolioPage(data: Dashboard, busy: Boolean, refresh: () -> Unit, 
     val now = total.points.lastOrNull()
     val today = data.today.toString()
     val holdings = remember(data, sort, ascending) { data.math.sortedHoldings(total.holdings, sort, ascending, today) }
-    val unavailable = holdings.filter { it.issue != null }
-    val estimatedCount = holdings.count { it.estimatedAccrued != null }
+    val estimatedPriceCount = holdings.count { it.priceIsEstimated }
+    val estimatedAccruedCount = holdings.count { it.estimatedAccrued != null }
     val defaultCount = holdings.count { it.bond.defaultStatus != null }
     var detailsDate by rememberSaveable(data.selectedAccount?.id) { mutableStateOf<String?>(null) }
     var breakdown by rememberSaveable(data.selectedAccount?.id) { mutableStateOf(BreakdownKind.MARKET) }
@@ -140,24 +140,38 @@ internal fun PortfolioPage(data: Dashboard, busy: Boolean, refresh: () -> Unit, 
             Column(Modifier.fillMaxWidth().background(Forest, RoundedCornerShape(25.dp)).padding(20.dp),
                 verticalArrangement = Arrangement.spacedBy(10.dp)) {
                 Text("Рыночная стоимость", color = Mint, style = MaterialTheme.typography.titleMedium)
-                val amount = if (now != null) now.value else BigDecimal.ZERO
-                Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
-                    Text(rubles(amount), Modifier.weight(1f, fill = false), color = Color.White,
+                Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                    val amount = if (now != null) now.value else BigDecimal.ZERO
+                    Text(rubles(amount), color = Color.White,
                         fontSize = 35.sp, lineHeight = 42.sp, fontWeight = FontWeight.Bold)
-                    Text("с НКД", color = Mint, style = MaterialTheme.typography.bodySmall)
+                    Text("С учтённым НКД", color = Mint, style = MaterialTheme.typography.bodySmall)
+                    if (now?.valueIsPartial == true) {
+                        Text("Частичная оценка", color = Mint, style = MaterialTheme.typography.bodySmall)
+                    }
                 }
-                if (now != null) {
-                    Column(verticalArrangement = Arrangement.spacedBy(3.dp)) {
-                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
-                            Text(rubles(now.cleanValue), color = Color.White, style = MaterialTheme.typography.titleMedium)
-                            Text("без НКД", color = Mint, style = MaterialTheme.typography.bodySmall)
-                        }
-                        if (now.cleanValueIsPartial) {
+                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                    Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(3.dp)) {
+                        Text("Без НКД", color = Mint, style = MaterialTheme.typography.bodySmall)
+                        Text(rubles(if (now != null) now.cleanValue else BigDecimal.ZERO),
+                            color = Color.White, style = MaterialTheme.typography.titleMedium)
+                        if (now != null && now.positionsWithCleanValue < now.openPositions) {
                             DetailLink("${now.positionsWithCleanValue} из ${now.openPositions} позиций", Mint) {
                                 openDetails(now.date, BreakdownKind.CLEAN)
                             }
                         }
                     }
+                    Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(3.dp)) {
+                        Text("Учтённый НКД", color = Mint, style = MaterialTheme.typography.bodySmall)
+                        Text(rubles(if (now != null) now.accruedValue else BigDecimal.ZERO),
+                            color = Color.White, style = MaterialTheme.typography.titleMedium)
+                        if (now != null && now.positionsWithAccrued < now.openPositions) {
+                            DetailLink("${now.positionsWithAccrued} из ${now.openPositions} позиций", Mint) {
+                                openDetails(now.date, BreakdownKind.MARKET)
+                            }
+                        }
+                    }
+                }
+                if (now != null) {
                     Column(verticalArrangement = Arrangement.spacedBy(3.dp)) {
                         Text("Отклонение от номинала без НКД", color = Mint, style = MaterialTheme.typography.bodySmall)
                         Text(rubles(total.premium.amount), color = Color.White, style = MaterialTheme.typography.titleMedium)
@@ -168,16 +182,16 @@ internal fun PortfolioPage(data: Dashboard, busy: Boolean, refresh: () -> Unit, 
                         total.premiumChange?.let { PremiumChangeLabel(it) { showPremiumChanges = true } }
                     }
                 }
-                if (unavailable.isNotEmpty()) {
-                    Text("Оценка неполная · ${unavailable.size} из ${holdings.size} позиций без оценки", color = Mint)
+                if (estimatedPriceCount > 0) {
+                    Text("Позиции с расчётной ценой · $estimatedPriceCount", color = Mint)
                 }
-                if (estimatedCount > 0) {
-                    Text("Позиции с расчётным НКД · $estimatedCount", color = Mint)
+                if (estimatedAccruedCount > 0) {
+                    Text("Позиции с расчётным НКД · $estimatedAccruedCount", color = Mint)
                 }
                 if (defaultCount > 0) {
                     Text("Выпуски с признаками дефолта · $defaultCount", color = Mint)
                 }
-                if (unavailable.isNotEmpty() || estimatedCount > 0) {
+                if (now?.valueIsPartial == true || now?.usesEstimatedValuation == true) {
                     TextButton(onClick = { openDetails(data.today, BreakdownKind.MARKET) }) {
                         Text("Подробности оценки", color = Color.White)
                         Glyph(Symbol.NEXT, color = Color.White)
@@ -219,7 +233,7 @@ internal fun PortfolioPage(data: Dashboard, busy: Boolean, refresh: () -> Unit, 
             if (holdings.isEmpty()) item { Sheet { Text("Открытых позиций нет", color = Muted) } }
             else item { PositionSortPicker(sort, ascending, selectSort, reverseSort) }
             items(holdings, key = { it.bond.isin }) { h ->
-                val nominal = remember(data, h.bond) { data.math.remainingNominal(h.bond, today) }
+                val nominal = h.clean.nominal
                 val change = remember(data, h.quote) { h.quote?.let(data.math::quoteChange) }
                 val sortDate = when (sort) {
                     PositionSort.FIRST_TRADE -> "Первая сделка · ${dateLabel(data.math.firstTradeDate(h.bond.isin), true)}"
@@ -249,12 +263,13 @@ internal fun PortfolioPage(data: Dashboard, busy: Boolean, refresh: () -> Unit, 
                         color = Muted, style = MaterialTheme.typography.bodySmall)
                     sortDate?.let { Text(it, color = Muted, style = MaterialTheme.typography.bodySmall) }
                     h.quoteDate?.let {
-                        val label = if (h.estimatedAccrued != null) "Расчётная оценка по котировке от" else "Котировка от"
+                        val label = if (h.priceIsEstimated) "Расчётная цена · котировка от" else "Котировка от"
                         Text("$label ${dateLabel(it, short = true)}",
-                            color = if (h.estimatedAccrued != null) Amber else Muted, style = MaterialTheme.typography.bodySmall)
+                            color = if (h.priceIsEstimated) Amber else Muted, style = MaterialTheme.typography.bodySmall)
                     }
                     h.bond.defaultStatus?.let { Text(it.label, color = Amber, style = MaterialTheme.typography.bodySmall) }
-                    h.issue?.let { Text(it.description(), color = Amber, style = MaterialTheme.typography.bodySmall) }
+                    h.cleanIssue?.let { Text(it.description(), color = Amber, style = MaterialTheme.typography.bodySmall) }
+                    h.accruedIssue?.let { Text(it.description(), color = Amber, style = MaterialTheme.typography.bodySmall) }
                 }
             }
             if (closedBonds.isNotEmpty()) {
@@ -319,10 +334,10 @@ internal fun PortfolioPage(data: Dashboard, busy: Boolean, refresh: () -> Unit, 
             }
             ResultDetailsDialog(exclusions, day, dismiss, showBond)
         } else {
-            val details by produceState<List<Holding>?>(null, data, day, breakdown) {
+            val details by produceState<List<Holding>?>(null, data, day) {
+                value = null
                 value = withContext(Dispatchers.Default) {
-                    if (breakdown == BreakdownKind.CLEAN) data.math.cleanValuationIssues(day)
-                    else total.holdings.filter { it.issue != null || it.estimatedAccrued != null }
+                    if (day == data.today) total.holdings else data.math.holdingsAt(day)
                 }
             }
             ValuationDetailsDialog(details, day.takeUnless { it == data.today }, dismiss, showBond,
@@ -342,7 +357,7 @@ private fun HistoryChart(
     val line = remember(visible, showResult) {
         visible.map {
             if (showResult) LinePoint(it.date, it.result, it.resultIsPartial || it.resultUsesEstimatedValuation)
-            else LinePoint(it.date, it.cleanValue, it.cleanValueIsPartial, it.cleanValueIsPartial)
+            else LinePoint(it.date, it.cleanValue, it.cleanValueIsPartial || it.usesEstimatedCleanPrice, it.cleanValueIsPartial)
         }
     }
     val firstKnown = remember(line) { line.indexOfFirst { it.value != null } }
@@ -370,6 +385,11 @@ private fun HistoryChart(
             }
             if (!showResult && selectedPoint?.cleanValueIsPartial == true) {
                 DetailLink("Частичная стоимость · ${selectedPoint.positionsWithCleanValue} из ${selectedPoint.openPositions} позиций", Amber) {
+                    openDetails(selectedPoint.date, BreakdownKind.CLEAN)
+                }
+            }
+            if (!showResult && selectedPoint?.usesEstimatedCleanPrice == true) {
+                DetailLink("Точка включает расчётную цену", Amber) {
                     openDetails(selectedPoint.date, BreakdownKind.CLEAN)
                 }
             }
@@ -550,9 +570,17 @@ fun BondDetails(data: Dashboard, bond: Bond, busy: Boolean, back: () -> Unit, re
             Sheet {
                 InfoRow("В портфеле", "${holding?.quantity ?: 0} шт.")
                 bond.defaultStatus?.let { InfoRow("Статус выпуска", it.label) }
-                InfoRow(if (holding?.estimatedAccrued != null) "Расчётная стоимость" else "Рыночная стоимость",
-                    rubles(holding?.value))
-                holding?.issue?.let { Text(it.description(), color = Amber) }
+                val valueLabel = when {
+                    holding?.value != null && !holding.valueIsComplete -> "Частичная стоимость с учтённым НКД"
+                    holding?.usesEstimatedValuation == true -> "Расчётная стоимость с НКД"
+                    else -> "Рыночная стоимость с НКД"
+                }
+                InfoRow(valueLabel, rubles(holding?.value))
+                if (holding?.priceIsEstimated == true) {
+                    Text("Расчётная цена · котировка от ${dateLabel(holding.quoteDate, true)}", color = Amber)
+                }
+                holding?.cleanIssue?.let { Text(it.description(), color = Amber) }
+                holding?.accruedIssue?.let { Text(it.description(), color = Amber) }
                 holding?.estimatedAccrued?.let { InfoRow("НКД по календарю", rubles(it)) }
                 InfoRow("Цена последней котировки", recent.pricePercentLabel())
                 InfoRow("Непогашенный номинал", rubles(nominal))
